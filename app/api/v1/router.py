@@ -5,6 +5,9 @@ from pymysql.err import IntegrityError
 from app.core.security import create_token, decode_token, hash_password, verify_password
 from app.db import mysql
 from app.schemas.quotation import (
+    ApprovalRequestCreate,
+    ApprovalRequestResponse,
+    ApprovalRequestReview,
     BootstrapResponse,
     FeeRule,
     FeeRuleUpdate,
@@ -14,6 +17,11 @@ from app.schemas.quotation import (
     LoginRequest,
     LoginResponse,
     QuotationCreate,
+    QuotationDraftCreate,
+    QuotationDraftListResponse,
+    QuotationDraftResponse,
+    QuotationDraftUpdate,
+    QuotationFromDraftsCreate,
     QuotationGenerateRequest,
     QuotationListResponse,
     QuotationResponse,
@@ -27,15 +35,25 @@ from app.schemas.quotation import (
     UserUpdate,
 )
 from app.services.quotation_service import (
+    create_approval_request,
+    create_followup as create_followup_record,
     create_quotation,
+    create_quotation_draft,
+    create_quotation_from_drafts,
+    delete_quotation_draft_item,
     generate_quotation,
     get_bootstrap,
+    get_approval_requests,
     get_fee_rules,
     get_quotation,
+    get_quotation_draft,
+    get_quotation_drafts,
     get_quotations,
     get_statistics,
     get_translation_rules,
     update_quotation_status,
+    update_quotation_draft,
+    review_approval_request,
     update_fee_rule,
     update_translation_rule,
 )
@@ -86,6 +104,42 @@ def require_consultant(
         )
 
 
+def require_quote_user(
+    authorization: str | None = Header(default=None),
+    x_user_email: str | None = Header(default=None),
+) -> dict[str, object]:
+    user = get_current_user(authorization, x_user_email)
+    if user is None:
+        raise HTTPException(
+            status_code=401,
+            detail={"code": "AUTH_REQUIRED", "message": "Authentication required"},
+        )
+    if user["role"] not in {"consultant", "admin"}:
+        raise HTTPException(
+            status_code=403,
+            detail={"code": "ROLE_FORBIDDEN", "message": "Role access forbidden"},
+        )
+    return user
+
+
+def require_approval_user(
+    authorization: str | None = Header(default=None),
+    x_user_email: str | None = Header(default=None),
+) -> dict[str, object]:
+    user = get_current_user(authorization, x_user_email)
+    if user is None:
+        raise HTTPException(
+            status_code=401,
+            detail={"code": "AUTH_REQUIRED", "message": "Authentication required"},
+        )
+    if user["role"] not in {"admin", "approver"}:
+        raise HTTPException(
+            status_code=403,
+            detail={"code": "APPROVAL_REQUIRED", "message": "Approval permission required"},
+        )
+    return user
+
+
 def require_quotation_access(
     quotation_id: str,
     authorization: str | None = Header(default=None),
@@ -111,6 +165,29 @@ def require_quotation_access(
     raise HTTPException(
         status_code=403,
         detail={"code": "QUOTATION_FORBIDDEN", "message": "Quotation access forbidden"},
+    )
+
+
+def require_draft_access(
+    draft_id: str,
+    authorization: str | None = Header(default=None),
+    x_user_email: str | None = Header(default=None),
+) -> tuple[QuotationDraftResponse, dict[str, object]]:
+    current_user = require_quote_user(authorization=authorization, x_user_email=x_user_email)
+    try:
+        draft = get_quotation_draft(draft_id)
+    except KeyError as exc:
+        raise HTTPException(
+            status_code=404,
+            detail={"code": "DRAFT_NOT_FOUND", "message": "Quotation draft not found"},
+        ) from exc
+    if current_user["role"] == "admin":
+        return draft, current_user
+    if current_user["role"] == "consultant" and draft.consultant_email == current_user["email"]:
+        return draft, current_user
+    raise HTTPException(
+        status_code=403,
+        detail={"code": "DRAFT_FORBIDDEN", "message": "Quotation draft access forbidden"},
     )
 
 
@@ -231,6 +308,79 @@ async def create(
     return create_quotation(payload)
 
 
+@api_router.post("/quotation-drafts")
+async def create_draft(
+    payload: QuotationDraftCreate,
+    authorization: str | None = Header(default=None),
+    x_user_email: str | None = Header(default=None),
+) -> QuotationDraftResponse:
+    current_user = require_quote_user(authorization=authorization, x_user_email=x_user_email)
+    try:
+        return create_quotation_draft(payload, current_user)
+    except KeyError as exc:
+        message = str(exc)
+        if "COUNTRY_NOT_FOUND" in message:
+            raise HTTPException(
+                status_code=404,
+                detail={"code": "COUNTRY_NOT_FOUND", "message": "Country not found"},
+            ) from exc
+        if "CONSULTANT_NOT_FOUND" in message:
+            raise HTTPException(
+                status_code=404,
+                detail={"code": "CONSULTANT_NOT_FOUND", "message": "Consultant not found"},
+            ) from exc
+        raise
+
+
+@api_router.get("/quotation-drafts")
+async def list_drafts(
+    user_email: str | None = Query(default=None),
+    authorization: str | None = Header(default=None),
+    x_user_email: str | None = Header(default=None),
+) -> QuotationDraftListResponse:
+    current_user = require_quote_user(authorization=authorization, x_user_email=x_user_email)
+    email = None
+    if current_user["role"] == "consultant":
+        email = str(current_user["email"])
+    elif current_user["role"] == "admin" and user_email:
+        email = user_email
+    return get_quotation_drafts(email)
+
+
+@api_router.patch("/quotation-drafts/{draft_id}")
+async def patch_draft(
+    draft_id: str,
+    payload: QuotationDraftUpdate,
+    authorization: str | None = Header(default=None),
+    x_user_email: str | None = Header(default=None),
+) -> QuotationDraftResponse:
+    require_draft_access(draft_id, authorization=authorization, x_user_email=x_user_email)
+    try:
+        return update_quotation_draft(draft_id, payload)
+    except KeyError as exc:
+        raise HTTPException(
+            status_code=404,
+            detail={"code": "DRAFT_NOT_FOUND", "message": "Quotation draft not found"},
+        ) from exc
+
+
+@api_router.delete("/quotation-drafts/{draft_id}/items/{item_id}")
+async def delete_draft_item(
+    draft_id: str,
+    item_id: str,
+    authorization: str | None = Header(default=None),
+    x_user_email: str | None = Header(default=None),
+) -> QuotationDraftResponse:
+    require_draft_access(draft_id, authorization=authorization, x_user_email=x_user_email)
+    try:
+        return delete_quotation_draft_item(draft_id, item_id)
+    except KeyError as exc:
+        raise HTTPException(
+            status_code=404,
+            detail={"code": "DRAFT_ITEM_NOT_FOUND", "message": "Quotation draft item not found"},
+        ) from exc
+
+
 @api_router.get("/quotations")
 async def list_quotations(
     user_email: str | None = Query(default=None),
@@ -255,6 +405,37 @@ async def list_quotations(
     if current_user["role"] == "admin" and user_email:
         email = user_email
     return get_quotations(email)
+
+
+@api_router.post("/quotations/from-drafts")
+async def create_from_drafts(
+    payload: QuotationFromDraftsCreate,
+    authorization: str | None = Header(default=None),
+    x_user_email: str | None = Header(default=None),
+) -> QuotationResponse:
+    current_user = require_quote_user(authorization=authorization, x_user_email=x_user_email)
+    try:
+        return create_quotation_from_drafts(payload, current_user)
+    except PermissionError as exc:
+        raise HTTPException(
+            status_code=403,
+            detail={"code": "DRAFT_FORBIDDEN", "message": "Quotation draft access forbidden"},
+        ) from exc
+    except ValueError as exc:
+        code = str(exc)
+        message_by_code = {
+            "FORMAL_QUOTE_BLOCKED_OVERDUE_FOLLOWUP": "Formal quote creation blocked by overdue followups",
+            "FORMAL_QUOTE_BLOCKED_UNCONVERTED": "Formal quote creation requires approval unlock",
+        }
+        raise HTTPException(
+            status_code=400,
+            detail={"code": code, "message": message_by_code.get(code, "Selected draft items cannot be combined")},
+        ) from exc
+    except KeyError as exc:
+        raise HTTPException(
+            status_code=404,
+            detail={"code": "DRAFT_ITEM_NOT_FOUND", "message": "Quotation draft item not found"},
+        ) from exc
 
 
 @api_router.get("/quotations/{quotation_id}")
@@ -285,15 +466,7 @@ async def create_followup(
     x_user_email: str | None = Header(default=None),
 ) -> FollowupResponse:
     _, current_user = require_quotation_access(quotation_id, authorization, x_user_email)
-    followup = mysql.insert_followup(
-        {
-            "quotation_id": quotation_id,
-            "user_id": current_user["id"],
-            "method": payload.method,
-            "content": payload.content,
-            "next_followup_date": payload.next_followup_date,
-        }
-    )
+    followup = create_followup_record(quotation_id, payload, current_user)
     return FollowupResponse.model_validate(followup)
 
 
@@ -307,10 +480,62 @@ async def patch_status(
     try:
         require_quotation_access(quotation_id, authorization, x_user_email)
         return update_quotation_status(quotation_id, payload)
+    except ValueError as exc:
+        code = str(exc)
+        raise HTTPException(
+            status_code=400,
+            detail={"code": code, "message": "Next follow-up date is required before this status"},
+        ) from exc
     except KeyError as exc:
         raise HTTPException(
             status_code=404,
             detail={"code": "QUOTATION_NOT_FOUND", "message": "Quotation not found"},
+        ) from exc
+
+
+@api_router.get("/quotation-approval-requests")
+async def list_approval_requests(
+    authorization: str | None = Header(default=None),
+    x_user_email: str | None = Header(default=None),
+) -> list[ApprovalRequestResponse]:
+    current_user = get_current_user(authorization, x_user_email)
+    if current_user is None:
+        raise HTTPException(
+            status_code=401,
+            detail={"code": "AUTH_REQUIRED", "message": "Authentication required"},
+        )
+    return get_approval_requests(current_user)
+
+
+@api_router.post("/quotation-approval-requests")
+async def request_approval_unlock(
+    payload: ApprovalRequestCreate,
+    authorization: str | None = Header(default=None),
+    x_user_email: str | None = Header(default=None),
+) -> ApprovalRequestResponse:
+    current_user = require_quote_user(authorization=authorization, x_user_email=x_user_email)
+    if current_user["role"] != "consultant":
+        raise HTTPException(
+            status_code=403,
+            detail={"code": "CONSULTANT_REQUIRED", "message": "Consultant permission required"},
+        )
+    return create_approval_request(payload, current_user)
+
+
+@api_router.patch("/quotation-approval-requests/{request_id}")
+async def review_approval_unlock(
+    request_id: str,
+    payload: ApprovalRequestReview,
+    authorization: str | None = Header(default=None),
+    x_user_email: str | None = Header(default=None),
+) -> ApprovalRequestResponse:
+    current_user = require_approval_user(authorization=authorization, x_user_email=x_user_email)
+    try:
+        return review_approval_request(request_id, payload, current_user)
+    except KeyError as exc:
+        raise HTTPException(
+            status_code=404,
+            detail={"code": "APPROVAL_REQUEST_NOT_FOUND", "message": "Approval request not found"},
         ) from exc
 
 

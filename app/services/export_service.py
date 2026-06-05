@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from io import BytesIO
 from decimal import Decimal
+from io import BytesIO
 
 from openpyxl import Workbook
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
@@ -150,4 +150,3 @@ def _apply_layout(worksheet) -> None:
             if isinstance(cell.value, Decimal):
                 cell.value = float(cell.value)
     worksheet.freeze_panes = "A9"
-
