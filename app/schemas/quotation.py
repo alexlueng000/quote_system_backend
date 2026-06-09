@@ -1,12 +1,16 @@
+import json
 from datetime import date, datetime
 from decimal import Decimal
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 Role = Literal["consultant", "admin", "approver"]
 UserStatus = Literal["active", "inactive"]
+CustomerStatus = Literal["active", "inactive"]
+CustomerType = Literal["企业", "个人", "律所", "代理机构", "其他"]
+CustomerLevel = Literal["普通", "重点", "战略", "暂停"]
 FollowupMethod = Literal["邮件", "电话", "微信", "企微", "会议", "其他"]
 QuotationStatus = Literal[
     "草稿",
@@ -23,6 +27,90 @@ QuotationStatus = Literal[
     "未成交",
     "已作废",
 ]
+
+JURISDICTION_TYPES = {
+    "single_country",
+    "special_region",
+    "regional_office",
+    "international_organization",
+    "treaty_entry",
+    "internal_business_object",
+}
+GEO_REGIONS = {
+    "Asia",
+    "Europe",
+    "Africa",
+    "Oceania",
+    "North America",
+    "South America",
+    "Latin America and the Caribbean",
+    "Middle East",
+    "Other",
+}
+BUSINESS_REGION_TAGS = {
+    "EUROPE",
+    "NORTH_AMERICA",
+    "LATIN_AMERICA",
+    "SOUTH_AMERICA",
+    "SOUTHEAST_ASIA",
+    "NORTHEAST_ASIA_JP_KR",
+    "GREATER_CHINA",
+    "MIDDLE_EAST",
+    "AFRICA",
+    "ANZ_OCEANIA",
+    "SOUTH_ASIA",
+    "OTHER",
+}
+ECONOMIC_ORG_TAGS = {"APEC", "ASEAN", "BRICS", "EU"}
+INTERNAL_ANALYTICS_TAGS = {
+    "HIGH_COST_MARKET",
+    "HIGH_FREQUENCY_QUOTATION_MARKET",
+    "HIGH_CONVERSION_MARKET",
+    "LOW_FREQUENCY_HIGH_VALUE_MARKET",
+    "KEY_MARKET",
+}
+MAINTAINABLE_BUSINESS_TAGS = BUSINESS_REGION_TAGS | ECONOMIC_ORG_TAGS
+LEGACY_BUSINESS_REGION_ALIASES = {
+    "Europe": "EUROPE",
+    "North America": "NORTH_AMERICA",
+    "Latin America": "LATIN_AMERICA",
+    "South America": "SOUTH_AMERICA",
+    "Southeast Asia": "SOUTHEAST_ASIA",
+    "Middle East": "MIDDLE_EAST",
+    "Africa": "AFRICA",
+    "Japan and Korea": "NORTHEAST_ASIA_JP_KR",
+    "Hong Kong Macao Taiwan": "GREATER_CHINA",
+    "Other": "OTHER",
+}
+
+
+def _normalize_business_tags(value: object) -> list[str]:
+    if value in (None, ""):
+        return ["OTHER"]
+    raw_items: list[object]
+    if isinstance(value, str):
+        try:
+            loaded = json.loads(value)
+        except json.JSONDecodeError:
+            raw_items = [item.strip() for item in value.replace("，", ",").split(",")]
+        else:
+            raw_items = loaded if isinstance(loaded, list) else [value]
+    elif isinstance(value, list):
+        raw_items = value
+    else:
+        raw_items = [value]
+
+    tags: list[str] = []
+    for raw_item in raw_items:
+        text = str(raw_item).strip()
+        if not text:
+            continue
+        normalized = LEGACY_BUSINESS_REGION_ALIASES.get(text, text).upper()
+        if normalized not in MAINTAINABLE_BUSINESS_TAGS:
+            raise ValueError("invalid business_region")
+        if normalized not in tags:
+            tags.append(normalized)
+    return tags or ["OTHER"]
 
 
 class User(BaseModel):
@@ -62,27 +150,547 @@ class LoginResponse(BaseModel):
     user: User
 
 
+class CustomerContactCreate(BaseModel):
+    name: str = Field(min_length=1)
+    title: str = ""
+    email: str = ""
+    phone: str = ""
+    wechat: str = ""
+    is_primary: bool = False
+    remark: str = ""
+
+
+class CustomerContactUpdate(BaseModel):
+    name: str | None = Field(default=None, min_length=1)
+    title: str | None = None
+    email: str | None = None
+    phone: str | None = None
+    wechat: str | None = None
+    is_primary: bool | None = None
+    remark: str | None = None
+
+
+class CustomerContactResponse(BaseModel):
+    id: str
+    customer_id: str
+    name: str
+    title: str = ""
+    email: str = ""
+    phone: str = ""
+    wechat: str = ""
+    is_primary: bool
+    remark: str = ""
+    created_at: datetime
+    updated_at: datetime
+
+
+class CustomerCreate(BaseModel):
+    name: str = Field(min_length=1)
+    customer_type: CustomerType = "企业"
+    consultant_email: str | None = None
+    department: str = ""
+    default_currency: str = "CNY"
+    default_quote_terms: str = ""
+    customer_level: CustomerLevel = "普通"
+    status: CustomerStatus = "active"
+    remark: str = ""
+    contacts: list[CustomerContactCreate] = Field(default_factory=list)
+
+
+class CustomerUpdate(BaseModel):
+    name: str | None = Field(default=None, min_length=1)
+    customer_type: CustomerType | None = None
+    consultant_email: str | None = None
+    department: str | None = None
+    default_currency: str | None = None
+    default_quote_terms: str | None = None
+    customer_level: CustomerLevel | None = None
+    status: CustomerStatus | None = None
+    remark: str | None = None
+
+
+class CustomerResponse(BaseModel):
+    id: str
+    customer_no: str
+    name: str
+    customer_type: CustomerType
+    consultant_id: str | None = None
+    consultant_email: str
+    consultant_name: str
+    department: str = ""
+    default_currency: str
+    default_quote_terms: str = ""
+    customer_level: CustomerLevel
+    status: CustomerStatus
+    remark: str = ""
+    created_at: datetime
+    updated_at: datetime
+    contacts: list[CustomerContactResponse] = Field(default_factory=list)
+
+
+class CustomerListResponse(BaseModel):
+    items: list[CustomerResponse]
+    total: int
+    page: int = 1
+    page_size: int = 100
+
+
 class Country(BaseModel):
     code: str
     name_cn: str
     name_en: str
     default_currency: str
+    country_type: str = "单一国家"
     enabled: bool
+    display_order: int = 0
+    international_region: str = ""
+    business_region: list[str] = Field(default_factory=lambda: ["OTHER"])
+    region_remark: str = ""
+    jurisdiction_id: str | None = None
+    internal_code: str = ""
+    display_code: str = ""
+    jurisdiction_type: str = ""
+    standard_code: str = ""
+    is_enabled: bool | None = None
+    iso_alpha2: str | None = None
+    iso_alpha3: str | None = None
+    iso_numeric: str | None = None
+    un_m49_code: str | None = None
+    wipo_st3_code: str | None = None
+    source_name: str = ""
+    source_url: str = ""
+    source_version: str = ""
+    source_note: str = ""
+    last_verified_at: datetime | None = None
+    source_verified: bool = False
+    source_verified_at: datetime | None = None
+    source_verified_by: str | None = None
+    manual_override: bool = False
+    remarks: str | None = None
+    is_deleted: bool = False
+    deleted_at: datetime | None = None
+    deleted_by: str | None = None
+    delete_reason: str | None = None
+
+    @field_validator("business_region", mode="before")
+    @classmethod
+    def normalize_country_business_tags(cls, value: object) -> list[str]:
+        return _normalize_business_tags(value)
 
 
-class FeeRule(BaseModel):
+class CountryUpdate(BaseModel):
+    name_cn: str | None = Field(default=None, min_length=1)
+    name_en: str | None = Field(default=None, min_length=1)
+    default_currency: str | None = None
+    country_type: str | None = None
+    enabled: bool | None = None
+    display_order: int | None = Field(default=None, ge=0)
+    international_region: str | None = None
+    business_region: list[str] | str | None = None
+    region_remark: str | None = None
+    internal_code: str | None = None
+    display_code: str | None = None
+    jurisdiction_type: str | None = None
+    is_enabled: bool | None = None
+    iso_alpha2: str | None = None
+    iso_alpha3: str | None = None
+    iso_numeric: str | None = None
+    un_m49_code: str | None = None
+    wipo_st3_code: str | None = None
+    source_name: str | None = None
+    source_url: str | None = None
+    source_version: str | None = None
+    last_verified_at: datetime | None = None
+    manual_override: bool | None = None
+    remarks: str | None = None
+
+    @field_validator("jurisdiction_type")
+    @classmethod
+    def validate_jurisdiction_type(cls, value: str | None) -> str | None:
+        if value in (None, ""):
+            return value
+        if value not in JURISDICTION_TYPES:
+            raise ValueError("invalid jurisdiction_type")
+        return value
+
+    @field_validator("international_region")
+    @classmethod
+    def validate_geo_region(cls, value: str | None) -> str | None:
+        if value in (None, ""):
+            return value
+        if value not in GEO_REGIONS:
+            raise ValueError("invalid international_region")
+        return value
+
+    @field_validator("business_region", mode="before")
+    @classmethod
+    def validate_business_region(cls, value: object) -> list[str] | None:
+        if value in (None, ""):
+            return None
+        return _normalize_business_tags(value)
+
+
+class CountryCreate(BaseModel):
+    reference_id: str = Field(min_length=1)
+    code: str = ""
+    name_cn: str = ""
+    name_en: str = ""
+    default_currency: str = "USD"
+    country_type: str = "单一国家"
+    enabled: bool = True
+    display_order: int = Field(default=0, ge=0)
+    international_region: str = ""
+    business_region: list[str] | str = Field(default_factory=lambda: ["OTHER"])
+    region_remark: str = ""
+    internal_code: str = ""
+    display_code: str = ""
+    jurisdiction_type: str = "single_country"
+    standard_code: str = ""
+    is_enabled: bool | None = None
+    source_name: str = ""
+    source_url: str = ""
+    source_version: str = ""
+    source_note: str = ""
+    source_verified: bool = False
+    last_verified_at: datetime | None = None
+    source_verified_at: datetime | None = None
+    source_verified_by: str | None = None
+    manual_override: bool = False
+    remarks: str | None = None
+
+    @field_validator("business_region", mode="before")
+    @classmethod
+    def validate_create_business_region(cls, value: object) -> list[str]:
+        return _normalize_business_tags(value)
+
+    @model_validator(mode="after")
+    def validate_source_verified(self) -> "CountryCreate":
+        if not self.source_verified:
+            raise ValueError("source verification is required")
+        return self
+
+
+class CountryDeleteRequest(BaseModel):
+    delete_reason: str = ""
+
+
+class CountryBulkFromReferenceRequest(BaseModel):
+    reference_ids: list[str] = Field(min_length=1)
+    source_verified: bool = False
+    source_verified_by: str | None = None
+    source_verified_at: datetime | None = None
+    batch_note: str = ""
+
+    @model_validator(mode="after")
+    def validate_source_verified(self) -> "CountryBulkFromReferenceRequest":
+        if not self.source_verified:
+            raise ValueError("source verification is required")
+        return self
+
+
+class CountryBulkFromReferenceResult(BaseModel):
+    reference_id: str
+    standard_code: str = ""
+    display_code: str = ""
+    name_cn: str = ""
+    name_en: str = ""
+    status: str
+    existence_status: str = ""
+    reason: str = ""
+    country: Country | None = None
+
+
+class CountryBulkFromReferenceResponse(BaseModel):
+    created_count: int = 0
+    restored_count: int = 0
+    added_count: int = 0
+    skipped_count: int = 0
+    failed_count: int = 0
+    created_items: list[CountryBulkFromReferenceResult] = Field(default_factory=list)
+    restored_items: list[CountryBulkFromReferenceResult] = Field(default_factory=list)
+    skipped_items: list[CountryBulkFromReferenceResult] = Field(default_factory=list)
+    failed_items: list[CountryBulkFromReferenceResult] = Field(default_factory=list)
+    added: list[CountryBulkFromReferenceResult] = Field(default_factory=list)
+    restored: list[CountryBulkFromReferenceResult] = Field(default_factory=list)
+    skipped: list[CountryBulkFromReferenceResult] = Field(default_factory=list)
+    failed: list[CountryBulkFromReferenceResult] = Field(default_factory=list)
+
+
+class CountryPathRule(BaseModel):
     id: str
     country_code: str
     application_type: str
     filing_route: str
+    route_detail: str = ""
+    affects_official_fee: bool = False
+    affects_local_service_fee: bool = False
+    affects_inhouse_service_fee: bool = False
+    affects_questions: bool = False
+    affects_documents: bool = False
+    affects_deadlines: bool = False
+    affects_translation: bool = False
+    affects_display: bool = False
+    enabled: bool = True
+    effective_date: date | None = None
+    remark: str = ""
+
+
+class CountryPathRuleUpdate(BaseModel):
+    route_detail: str | None = None
+    affects_official_fee: bool | None = None
+    affects_local_service_fee: bool | None = None
+    affects_inhouse_service_fee: bool | None = None
+    affects_questions: bool | None = None
+    affects_documents: bool | None = None
+    affects_deadlines: bool | None = None
+    affects_translation: bool | None = None
+    affects_display: bool | None = None
+    enabled: bool | None = None
+    effective_date: date | None = None
+    remark: str | None = None
+
+
+class CountryPathRuleCreate(BaseModel):
+    country_code: str = Field(min_length=1)
+    application_type: str = Field(min_length=1)
+    filing_route: str = Field(min_length=1)
+    route_detail: str = ""
+    affects_official_fee: bool = False
+    affects_local_service_fee: bool = False
+    affects_inhouse_service_fee: bool = False
+    affects_questions: bool = False
+    affects_documents: bool = False
+    affects_deadlines: bool = False
+    affects_translation: bool = False
+    affects_display: bool = True
+    enabled: bool = True
+    effective_date: date | None = None
+    remark: str = ""
+
+
+class EntityTypeRule(BaseModel):
+    id: str
+    country_code: str
+    application_type: str
+    filing_route: str = ""
+    enabled: bool = True
+    entity_types: list[str] = Field(default_factory=list)
+    affects_official_fee: bool = False
+    affects_questions: bool = False
+    requires_customer_confirmation: bool = False
+    requires_supporting_documents: bool = False
+    remark: str = ""
+
+
+class EntityTypeRuleUpdate(BaseModel):
+    enabled: bool | None = None
+    entity_types: list[str] | None = None
+    affects_official_fee: bool | None = None
+    affects_questions: bool | None = None
+    requires_customer_confirmation: bool | None = None
+    requires_supporting_documents: bool | None = None
+    remark: str | None = None
+
+
+class EntityTypeRuleCreate(BaseModel):
+    country_code: str = Field(min_length=1)
+    application_type: str = Field(min_length=1)
+    filing_route: str = ""
+    enabled: bool = True
+    entity_types: list[str] = Field(default_factory=list)
+    affects_official_fee: bool = False
+    affects_questions: bool = False
+    requires_customer_confirmation: bool = False
+    requires_supporting_documents: bool = False
+    remark: str = ""
+
+
+class LanguageRule(BaseModel):
+    id: str
+    country_code: str
+    application_type: str
+    accepted_languages: list[str] = Field(default_factory=list)
+    source_language: str = ""
+    target_language: str = ""
+    intermediate_language: str = ""
+    needs_second_translation: bool = False
+    recommended_scheme_id: str = ""
+    default_translation_fee: bool = False
+    allow_scheme_switch: bool = True
+    enabled: bool = True
+    remark: str = ""
+
+
+class LanguageRuleUpdate(BaseModel):
+    accepted_languages: list[str] | None = None
+    source_language: str | None = None
+    target_language: str | None = None
+    intermediate_language: str | None = None
+    needs_second_translation: bool | None = None
+    recommended_scheme_id: str | None = None
+    default_translation_fee: bool | None = None
+    allow_scheme_switch: bool | None = None
+    enabled: bool | None = None
+    remark: str | None = None
+
+
+class LanguageRuleCreate(BaseModel):
+    country_code: str = Field(min_length=1)
+    application_type: str = Field(min_length=1)
+    accepted_languages: list[str] = Field(default_factory=list)
+    source_language: str = ""
+    target_language: str = ""
+    intermediate_language: str = ""
+    needs_second_translation: bool = False
+    recommended_scheme_id: str = ""
+    default_translation_fee: bool = False
+    allow_scheme_switch: bool = True
+    enabled: bool = True
+    remark: str = ""
+
+
+class FxTaxRule(BaseModel):
+    id: str
+    country_code: str
+    official_currency: str
+    official_quote_currency: str
+    local_service_currency: str
+    local_service_currency_options: list[str] = Field(default_factory=list)
+    quote_currency: str
+    fx_rate: Decimal
+    tax_rate: Decimal
+    tax_included: bool = False
+    lock_on_formal_quote: bool = True
+    version: str = ""
+    enabled: bool = True
+    remark: str = ""
+
+
+class FxTaxRuleUpdate(BaseModel):
+    official_currency: str | None = None
+    official_quote_currency: str | None = None
+    local_service_currency: str | None = None
+    local_service_currency_options: list[str] | None = None
+    quote_currency: str | None = None
+    fx_rate: Decimal | None = Field(default=None, ge=0)
+    tax_rate: Decimal | None = Field(default=None, ge=0)
+    tax_included: bool | None = None
+    lock_on_formal_quote: bool | None = None
+    version: str | None = None
+    enabled: bool | None = None
+    remark: str | None = None
+
+
+class FxTaxRuleCreate(BaseModel):
+    country_code: str = Field(min_length=1)
+    official_currency: str = Field(min_length=1)
+    official_quote_currency: str = Field(min_length=1)
+    local_service_currency: str = Field(min_length=1)
+    local_service_currency_options: list[str] = Field(default_factory=list)
+    quote_currency: str = Field(min_length=1)
+    fx_rate: Decimal = Field(default=Decimal("1"), ge=0)
+    tax_rate: Decimal = Field(default=Decimal("0"), ge=0)
+    tax_included: bool = False
+    lock_on_formal_quote: bool = True
+    version: str = ""
+    enabled: bool = True
+    remark: str = ""
+
+
+class SpecialRule(BaseModel):
+    id: str
+    country_code: str
+    application_type: str = ""
+    filing_route: str = ""
+    rule_type: str
+    enabled: bool = True
+    triggers_extra_fee: bool = False
+    triggers_risk_warning: bool = False
+    requires_customer_confirmation: bool = False
+    risk_summary: str = ""
+    linked_rule_code: str = ""
+    remark: str = ""
+
+class SpecialRuleUpdate(BaseModel):
+    enabled: bool | None = None
+    triggers_extra_fee: bool | None = None
+    triggers_risk_warning: bool | None = None
+    requires_customer_confirmation: bool | None = None
+    risk_summary: str | None = None
+    linked_rule_code: str | None = None
+    remark: str | None = None
+
+
+class SpecialRuleCreate(BaseModel):
+    country_code: str = Field(min_length=1)
+    application_type: str = ""
+    filing_route: str = ""
+    rule_type: str = Field(min_length=1)
+    enabled: bool = True
+    triggers_extra_fee: bool = False
+    triggers_risk_warning: bool = False
+    requires_customer_confirmation: bool = False
+    risk_summary: str = ""
+    linked_rule_code: str = ""
+    remark: str = ""
+
+
+class CountryConfigResponse(BaseModel):
+    countries: list[Country]
+    path_rules: list[CountryPathRule]
+    entity_type_rules: list[EntityTypeRule]
+    language_rules: list[LanguageRule]
+    fx_tax_rules: list[FxTaxRule]
+    special_rules: list[SpecialRule]
+
+
+class FeeRule(BaseModel):
+    id: str
+    version_id: str | None = None
+    country_code: str
+    application_type: str
+    filing_route: str
+    pct_route_detail: str = ""
+    entity_type: str = ""
     stage: str
+    item_group_key: str = ""
     item_name: str
     fee_type: str
+    fee_category: str = ""
     amount: Decimal
     currency: str
+    quote_currency: str = ""
+    is_multi_currency: bool = False
+    tax_included: bool = False
     is_default: bool
     is_active: bool = True
     cost_nature: str
+    trigger_condition: str = ""
+    price_version: str = ""
+    remark: str = ""
+
+
+class FeeRuleCreate(BaseModel):
+    version_id: str | None = None
+    country_code: str = Field(min_length=1)
+    application_type: str = Field(min_length=1)
+    filing_route: str = Field(min_length=1)
+    pct_route_detail: str = ""
+    entity_type: str = ""
+    stage: str = Field(min_length=1)
+    item_group_key: str = ""
+    item_name: str = Field(min_length=1)
+    fee_type: str = Field(min_length=1)
+    fee_category: str = "其他"
+    amount: Decimal = Field(default=Decimal("0"), ge=0)
+    currency: str = Field(min_length=1)
+    quote_currency: str = ""
+    is_multi_currency: bool = False
+    tax_included: bool = False
+    is_default: bool = True
+    is_active: bool = True
+    cost_nature: str = "当前费用"
+    trigger_condition: str = ""
     remark: str = ""
 
 
@@ -100,6 +708,12 @@ class TranslationRule(BaseModel):
 class FeeRuleUpdate(BaseModel):
     amount: Decimal | None = Field(default=None, ge=0)
     currency: str | None = None
+    quote_currency: str | None = None
+    item_group_key: str | None = None
+    fee_type: str | None = None
+    fee_category: str | None = None
+    trigger_condition: str | None = None
+    tax_included: bool | None = None
     is_default: bool | None = None
     is_active: bool | None = None
     remark: str | None = None
@@ -126,6 +740,32 @@ class BootstrapResponse(BaseModel):
     translation_rules: list[TranslationRule]
 
 
+class WorkbenchOptionsResponse(BaseModel):
+    country_code: str = ""
+    application_types: list[str] = Field(default_factory=list)
+    filing_routes: list[str] = Field(default_factory=list)
+    route_details: list[str] = Field(default_factory=list)
+    entity_types: list[str] = Field(default_factory=list)
+    quote_currency: str = ""
+    has_path_rules: bool = False
+
+
+class QuoteJurisdictionOptionPreview(BaseModel):
+    jurisdiction_id: str
+    standard_code: str = ""
+    display_code: str = ""
+    quote_display_name: str = ""
+    jurisdiction_type: str = ""
+    quote_option_group: str = ""
+    quote_business_lines: list[str] = Field(default_factory=list)
+    legacy_country_code: str | None = None
+    is_enabled: bool = False
+    quote_selectable: bool = False
+    not_selectable_reason: str | None = None
+    geo_region: str = ""
+    business_economic_regions: list[str] = Field(default_factory=list)
+
+
 class QuotationGenerateRequest(BaseModel):
     client_name: str = Field(min_length=1)
     client_contact: str = ""
@@ -133,6 +773,8 @@ class QuotationGenerateRequest(BaseModel):
     country_code: str
     application_type: str
     filing_route: str
+    pct_route_detail: str = ""
+    entity_type: str = ""
     currency: str
     has_case: bool = False
     case_title: str = ""
@@ -175,6 +817,8 @@ class QuotationDraftCreate(BaseModel):
     country_codes: list[str] = Field(min_length=1)
     application_type: str
     filing_route: str
+    pct_route_detail: str = ""
+    entity_type: str = ""
     has_case: bool = False
     case_title: str = ""
     applicant_count: int = Field(default=1, ge=0)

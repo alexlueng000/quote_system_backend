@@ -1,20 +1,41 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from decimal import Decimal
 from uuid import uuid4
 
 from app.db import mysql
+from app.reference.jurisdictions import JURISDICTION_REFERENCES, get_jurisdiction_reference
 from app.schemas.quotation import (
     ApprovalRequestCreate,
     ApprovalRequestResponse,
     ApprovalRequestReview,
     BootstrapResponse,
     Country,
+    CountryBulkFromReferenceRequest,
+    CountryBulkFromReferenceResponse,
+    CountryBulkFromReferenceResult,
+    CountryCreate,
+    CountryConfigResponse,
+    CountryPathRule,
+    CountryPathRuleCreate,
+    CountryPathRuleUpdate,
+    CountryUpdate,
+    EntityTypeRule,
+    EntityTypeRuleCreate,
+    EntityTypeRuleUpdate,
     FeeRule,
+    FeeRuleCreate,
     FeeRuleUpdate,
+    FxTaxRule,
+    FxTaxRuleCreate,
+    FxTaxRuleUpdate,
     GeneratedQuotation,
+    LanguageRule,
+    LanguageRuleCreate,
+    LanguageRuleUpdate,
+    QuoteJurisdictionOptionPreview,
     QuotationCreate,
     QuotationDraftCreate,
     QuotationDraftListResponse,
@@ -27,9 +48,13 @@ from app.schemas.quotation import (
     QuotationResponse,
     QuotationStatusUpdate,
     StatisticsResponse,
+    SpecialRule,
+    SpecialRuleCreate,
+    SpecialRuleUpdate,
     TranslationRule,
     TranslationRuleUpdate,
     User,
+    WorkbenchOptionsResponse,
 )
 
 STATUSES = [
@@ -73,19 +98,94 @@ FOLLOWUP_REQUIRED_STATUSES = {"已发送客户", "跟进中"}
 FORMAL_QUOTE_OVERDUE_BLOCK_DAYS = 7
 FORMAL_QUOTE_UNCONVERTED_LIMIT = 10
 APPROVAL_REQUEST_TYPE = "超过10条未转化继续报价"
+APPLICATION_TYPES = ["发明", "实用新型", "外观"]
+FILING_ROUTES = ["直接申请", "巴黎公约", "PCT进入"]
 
 
 def get_bootstrap() -> BootstrapResponse:
     return BootstrapResponse(
         users=[User.model_validate(user) for user in mysql.fetch_all_users()],
         countries=[Country.model_validate(country) for country in mysql.fetch_countries()],
-        application_types=["发明", "实用新型", "外观"],
-        filing_routes=["直接申请", "巴黎公约", "PCT进入"],
+        application_types=APPLICATION_TYPES,
+        filing_routes=FILING_ROUTES,
         currencies=["CNY", "USD", "EUR", "JPY", "KRW"],
         statuses=STATUSES,
         fee_rules=[FeeRule.model_validate(rule) for rule in mysql.fetch_fee_rules()],
         translation_rules=[TranslationRule.model_validate(rule) for rule in mysql.fetch_translation_rules()],
     )
+
+
+def get_workbench_options(
+    country_code: str | None = None,
+    application_type: str | None = None,
+    filing_route: str | None = None,
+) -> WorkbenchOptionsResponse:
+    countries = mysql.fetch_countries()
+    country = _resolve_country(countries, country_code)
+    if country is None:
+        return WorkbenchOptionsResponse()
+
+    config = mysql.fetch_country_config()
+    path_rules = [
+        rule
+        for rule in config["path_rules"]
+        if str(rule["country_code"]) == str(country["code"]) and _is_enabled_effective(rule)
+    ]
+    has_path_rules = bool(path_rules)
+
+    application_types = _unique_strings(rule["application_type"] for rule in path_rules)
+    if not application_types:
+        application_types = APPLICATION_TYPES
+    selected_application_type = (
+        application_type if application_type in application_types else application_types[0]
+    )
+
+    route_rule_pool = [
+        rule
+        for rule in path_rules
+        if str(rule["application_type"]) == selected_application_type
+    ]
+    filing_routes = _unique_strings(rule["filing_route"] for rule in route_rule_pool)
+    if not filing_routes:
+        filing_routes = FILING_ROUTES
+    selected_filing_route = filing_route if filing_route in filing_routes else filing_routes[0]
+
+    route_details = _unique_strings(
+        rule["route_detail"]
+        for rule in route_rule_pool
+        if str(rule["filing_route"]) == selected_filing_route and str(rule.get("route_detail") or "")
+    )
+    entity_types = _entity_type_options(
+        config["entity_type_rules"],
+        str(country["code"]),
+        selected_application_type,
+        selected_filing_route,
+    )
+
+    return WorkbenchOptionsResponse(
+        country_code=str(country["code"]),
+        application_types=application_types,
+        filing_routes=filing_routes,
+        route_details=route_details,
+        entity_types=entity_types,
+        quote_currency=str(country["default_currency"]),
+        has_path_rules=has_path_rules,
+    )
+
+
+def fetch_quote_jurisdiction_options_preview(
+    selectable_only: bool = False,
+    business_line: str | None = None,
+    option_group: str | None = None,
+) -> list[QuoteJurisdictionOptionPreview]:
+    return [
+        QuoteJurisdictionOptionPreview.model_validate(row)
+        for row in mysql.fetch_quote_jurisdiction_options_preview(
+            selectable_only=selectable_only,
+            business_line=business_line,
+            option_group=option_group,
+        )
+    ]
 
 
 def generate_quotation(payload: QuotationGenerateRequest) -> GeneratedQuotation:
@@ -214,6 +314,13 @@ def create_quotation_draft(
         country = countries.get(country_code)
         if country is None:
             raise KeyError(f"COUNTRY_NOT_FOUND:{country_code}")
+        _validate_workbench_selection(
+            country_code=country_code,
+            application_type=payload.application_type,
+            filing_route=payload.filing_route,
+            pct_route_detail=payload.pct_route_detail,
+            entity_type=payload.entity_type,
+        )
         quote_currency = str(country["default_currency"])
         generated = generate_quotation(
             QuotationGenerateRequest(
@@ -223,6 +330,8 @@ def create_quotation_draft(
                 country_code=country_code,
                 application_type=payload.application_type,
                 filing_route=payload.filing_route,
+                pct_route_detail=payload.pct_route_detail,
+                entity_type=payload.entity_type,
                 currency=quote_currency,
                 has_case=payload.has_case,
                 case_title=payload.case_title,
@@ -244,8 +353,8 @@ def create_quotation_draft(
                 "country_code": country_code,
                 "application_type": payload.application_type,
                 "filing_route": payload.filing_route,
-                "pct_route_detail": "",
-                "entity_type": "",
+                "pct_route_detail": payload.pct_route_detail,
+                "entity_type": payload.entity_type,
                 "case_title": payload.case_title,
                 "quote_currency": quote_currency,
                 "current_stage_total": generated.current_stage_total,
@@ -503,9 +612,387 @@ def get_fee_rules() -> list[FeeRule]:
     return [FeeRule.model_validate(rule) for rule in mysql.fetch_fee_rules(include_inactive=True)]
 
 
+def get_country_config(include_deleted: bool = False) -> CountryConfigResponse:
+    config = mysql.fetch_country_config(include_deleted=include_deleted)
+    return CountryConfigResponse(
+        countries=[Country.model_validate(item) for item in config["countries"]],
+        path_rules=[CountryPathRule.model_validate(item) for item in config["path_rules"]],
+        entity_type_rules=[
+            EntityTypeRule.model_validate(item)
+            for item in config["entity_type_rules"]
+        ],
+        language_rules=[LanguageRule.model_validate(item) for item in config["language_rules"]],
+        fx_tax_rules=[FxTaxRule.model_validate(item) for item in config["fx_tax_rules"]],
+        special_rules=[SpecialRule.model_validate(item) for item in config["special_rules"]],
+    )
+
+
+def create_country_config(payload: CountryCreate, current_user: dict[str, object]) -> Country:
+    reference = get_jurisdiction_reference(payload.reference_id)
+    if reference is None:
+        raise KeyError("JURISDICTION_REFERENCE_NOT_FOUND")
+    verified_at = payload.last_verified_at or payload.source_verified_at or datetime.now(timezone.utc)
+    display_code = payload.display_code.strip() or reference.display_code
+    name_cn = payload.name_cn.strip() or reference.name_cn
+    name_en = payload.name_en.strip() or reference.name_en
+    manual_override = (
+        payload.manual_override
+        or display_code != reference.display_code
+        or name_cn != reference.name_cn
+        or name_en != reference.name_en
+    )
+    values = {
+        **payload.model_dump(),
+        "code": reference.standard_code,
+        "internal_code": reference.standard_code,
+        "standard_code": reference.standard_code,
+        "display_code": display_code,
+        "name_cn": name_cn,
+        "name_en": name_en,
+        "country_type": _jurisdiction_type_label(reference.jurisdiction_type),
+        "jurisdiction_type": reference.jurisdiction_type,
+        "international_region": reference.geo_region,
+        "business_region": payload.business_region or list(reference.default_business_economic_regions),
+        "source_name": reference.source_name,
+        "source_url": reference.source_url,
+        "source_version": reference.source_version,
+        "source_note": reference.source_note,
+        # Legacy compatibility only. Currency rules belong in the FX/tax module.
+        "default_currency": reference.default_currency_legacy,
+        "source_verified": True,
+        "last_verified_at": verified_at,
+        "source_verified_at": verified_at,
+        "source_verified_by": payload.source_verified_by or str(current_user.get("email") or current_user.get("id") or "local_admin"),
+        "manual_override": manual_override,
+    }
+    return Country.model_validate(mysql.insert_country_config(values))
+
+
+def create_countries_from_reference_bulk(
+    payload: CountryBulkFromReferenceRequest,
+    current_user: dict[str, object],
+) -> CountryBulkFromReferenceResponse:
+    verified_at = payload.source_verified_at or datetime.now(timezone.utc)
+    verified_by = payload.source_verified_by or str(
+        current_user.get("email") or current_user.get("id") or "local_admin"
+    )
+    response = CountryBulkFromReferenceResponse()
+    seen_reference_ids: set[str] = set()
+
+    for reference_id in payload.reference_ids:
+        if reference_id in seen_reference_ids:
+            response.skipped.append(
+                CountryBulkFromReferenceResult(
+                    reference_id=reference_id,
+                    status="skipped",
+                    existence_status="duplicate_request",
+                    reason="请求中重复选择，已跳过",
+                )
+            )
+            continue
+        seen_reference_ids.add(reference_id)
+
+        reference = get_jurisdiction_reference(reference_id)
+        if reference is None:
+            response.failed.append(
+                CountryBulkFromReferenceResult(
+                    reference_id=reference_id,
+                    status="failed",
+                    existence_status="not_exists",
+                    reason="本地 reference 不存在或已停用",
+                )
+            )
+            continue
+
+        base_result = {
+            "reference_id": reference.reference_id,
+            "standard_code": reference.standard_code,
+            "display_code": reference.display_code,
+            "name_cn": reference.name_cn,
+            "name_en": reference.name_en,
+        }
+        existence = mysql.inspect_country_reference_status(reference.standard_code, reference.display_code)
+        existence_status = str(existence.get("status") or "not_exists")
+        if existence_status == "active_exists":
+            response.skipped.append(
+                CountryBulkFromReferenceResult(
+                    **base_result,
+                    status="skipped",
+                    existence_status=existence_status,
+                    reason="主档中存在且未删除，已跳过",
+                )
+            )
+            continue
+        if existence_status in {"soft_deleted_exists", "legacy_exists_only"}:
+            try:
+                country = mysql.restore_country_config_from_reference(
+                    {
+                        "code": reference.standard_code,
+                        "name_cn": reference.name_cn,
+                        "name_en": reference.name_en,
+                        "enabled": True,
+                        "business_region": list(reference.default_business_economic_regions),
+                        "region_remark": payload.batch_note,
+                        "country_type": _jurisdiction_type_label(reference.jurisdiction_type),
+                        "default_currency": reference.default_currency_legacy,
+                        "internal_code": reference.standard_code,
+                        "standard_code": reference.standard_code,
+                        "display_code": reference.display_code,
+                        "jurisdiction_type": reference.jurisdiction_type,
+                        "is_enabled": True,
+                        "international_region": reference.geo_region,
+                        "source_name": reference.source_name,
+                        "source_url": reference.source_url,
+                        "source_version": reference.source_version,
+                        "source_note": reference.source_note,
+                        "source_verified": True,
+                        "source_verified_at": verified_at,
+                        "last_verified_at": verified_at,
+                        "source_verified_by": verified_by,
+                        "manual_override": False,
+                        "remarks": payload.batch_note,
+                    },
+                    existence,
+                )
+            except Exception as exc:
+                response.failed.append(
+                    CountryBulkFromReferenceResult(
+                        **base_result,
+                        status="failed",
+                        existence_status=existence_status,
+                        reason=str(exc) or "恢复失败",
+                    )
+                )
+                continue
+
+            response.restored.append(
+                CountryBulkFromReferenceResult(
+                    **base_result,
+                    status="restored",
+                    existence_status=existence_status,
+                    reason="已恢复到主档",
+                    country=Country.model_validate(country),
+                )
+            )
+            continue
+
+        try:
+            country = create_country_config(
+                CountryCreate(
+                    reference_id=reference.reference_id,
+                    code=reference.standard_code,
+                    name_cn=reference.name_cn,
+                    name_en=reference.name_en,
+                    enabled=True,
+                    business_region=list(reference.default_business_economic_regions),
+                    region_remark=payload.batch_note,
+                    internal_code=reference.standard_code,
+                    standard_code=reference.standard_code,
+                    display_code=reference.display_code,
+                    jurisdiction_type=reference.jurisdiction_type,
+                    is_enabled=True,
+                    source_note=reference.source_note,
+                    source_verified=True,
+                    source_verified_at=verified_at,
+                    last_verified_at=verified_at,
+                    source_verified_by=verified_by,
+                    manual_override=False,
+                    remarks=payload.batch_note,
+                ),
+                current_user,
+            )
+        except Exception as exc:
+            response.failed.append(
+                CountryBulkFromReferenceResult(
+                    **base_result,
+                    status="failed",
+                    existence_status=existence_status,
+                    reason=str(exc) or "新增失败",
+                )
+            )
+            continue
+
+        response.added.append(
+            CountryBulkFromReferenceResult(
+                **base_result,
+                status="created",
+                existence_status=existence_status,
+                reason="新增成功",
+                country=country,
+            )
+        )
+
+    response.created_items = response.added
+    response.restored_items = response.restored
+    response.skipped_items = response.skipped
+    response.failed_items = response.failed
+    response.created_count = len(response.created_items)
+    response.restored_count = len(response.restored_items)
+    response.added_count = response.created_count
+    response.skipped_count = len(response.skipped)
+    response.failed_count = len(response.failed)
+    return response
+
+
+def update_country_config(country_code: str, payload: CountryUpdate) -> Country:
+    values = payload.model_dump(exclude_unset=True)
+    return Country.model_validate(mysql.update_country_config(country_code, values))
+
+
+def delete_country_config(
+    country_code: str,
+    delete_reason: str,
+    current_user: dict[str, object],
+) -> None:
+    deleted_by = str(current_user.get("email") or current_user.get("id") or "")
+    mysql.soft_delete_country_config(country_code, deleted_by, delete_reason)
+
+
+def restore_country_config(country_code: str, current_user: dict[str, object]) -> Country:
+    code = country_code.upper()
+    reference = next(
+        (
+            item
+            for item in JURISDICTION_REFERENCES
+            if item.is_active and code in {item.standard_code.upper(), item.display_code.upper()}
+        ),
+        None,
+    )
+    verified_at = datetime.now(timezone.utc)
+    verified_by = str(current_user.get("email") or current_user.get("id") or "local_admin")
+    if reference is not None:
+        record = {
+            "code": reference.standard_code,
+            "name_cn": reference.name_cn,
+            "name_en": reference.name_en,
+            "enabled": True,
+            "business_region": list(reference.default_business_economic_regions),
+            "country_type": _jurisdiction_type_label(reference.jurisdiction_type),
+            "default_currency": reference.default_currency_legacy,
+            "internal_code": reference.standard_code,
+            "standard_code": reference.standard_code,
+            "display_code": reference.display_code,
+            "jurisdiction_type": reference.jurisdiction_type,
+            "is_enabled": True,
+            "international_region": reference.geo_region,
+            "source_name": reference.source_name,
+            "source_url": reference.source_url,
+            "source_version": reference.source_version,
+            "source_note": reference.source_note,
+            "source_verified": True,
+            "source_verified_at": verified_at,
+            "last_verified_at": verified_at,
+            "source_verified_by": verified_by,
+            "manual_override": False,
+        }
+        existence = mysql.inspect_country_reference_status(reference.standard_code, reference.display_code)
+    else:
+        rows = mysql.fetch_country_config(include_deleted=True)["countries"]
+        existing = next((item for item in rows if str(item.get("code") or "").upper() == code), None)
+        if existing is None:
+            raise KeyError(code)
+        record = {
+            **existing,
+            "code": code,
+            "enabled": True,
+            "is_enabled": True,
+            "source_verified": True,
+            "source_verified_at": verified_at,
+            "last_verified_at": verified_at,
+            "source_verified_by": verified_by,
+        }
+        existence = {"country_code": code, "status": "soft_deleted_exists"}
+    return Country.model_validate(mysql.restore_country_config_from_reference(record, existence))
+
+
+def update_country_path_rule(rule_id: str, payload: CountryPathRuleUpdate) -> CountryPathRule:
+    values = payload.model_dump(exclude_unset=True)
+    return CountryPathRule.model_validate(mysql.update_country_path_rule(rule_id, values))
+
+
+def create_country_path_rule(payload: CountryPathRuleCreate) -> CountryPathRule:
+    values = payload.model_dump()
+    values["id"] = f"path-{uuid4().hex[:12]}"
+    return CountryPathRule.model_validate(mysql.insert_country_path_rule(values))
+
+
+def delete_country_path_rule(rule_id: str) -> None:
+    mysql.delete_country_path_rule(rule_id)
+
+
+def update_entity_type_rule(rule_id: str, payload: EntityTypeRuleUpdate) -> EntityTypeRule:
+    values = payload.model_dump(exclude_unset=True)
+    return EntityTypeRule.model_validate(mysql.update_entity_type_rule(rule_id, values))
+
+
+def create_entity_type_rule(payload: EntityTypeRuleCreate) -> EntityTypeRule:
+    values = payload.model_dump()
+    values["id"] = f"entity-{uuid4().hex[:12]}"
+    return EntityTypeRule.model_validate(mysql.insert_entity_type_rule(values))
+
+
+def delete_entity_type_rule(rule_id: str) -> None:
+    mysql.delete_entity_type_rule(rule_id)
+
+
+def update_language_rule(rule_id: str, payload: LanguageRuleUpdate) -> LanguageRule:
+    values = payload.model_dump(exclude_unset=True)
+    return LanguageRule.model_validate(mysql.update_language_rule(rule_id, values))
+
+
+def create_language_rule(payload: LanguageRuleCreate) -> LanguageRule:
+    values = payload.model_dump()
+    values["id"] = f"lang-{uuid4().hex[:12]}"
+    return LanguageRule.model_validate(mysql.insert_language_rule(values))
+
+
+def delete_language_rule(rule_id: str) -> None:
+    mysql.delete_language_rule(rule_id)
+
+
+def update_fx_tax_rule(rule_id: str, payload: FxTaxRuleUpdate) -> FxTaxRule:
+    values = payload.model_dump(exclude_unset=True)
+    return FxTaxRule.model_validate(mysql.update_fx_tax_rule(rule_id, values))
+
+
+def create_fx_tax_rule(payload: FxTaxRuleCreate) -> FxTaxRule:
+    values = payload.model_dump()
+    values["id"] = f"fx-{uuid4().hex[:12]}"
+    return FxTaxRule.model_validate(mysql.insert_fx_tax_rule(values))
+
+
+def delete_fx_tax_rule(rule_id: str) -> None:
+    mysql.delete_fx_tax_rule(rule_id)
+
+
+def update_special_rule(rule_id: str, payload: SpecialRuleUpdate) -> SpecialRule:
+    values = payload.model_dump(exclude_unset=True)
+    return SpecialRule.model_validate(mysql.update_special_rule(rule_id, values))
+
+
+def create_special_rule(payload: SpecialRuleCreate) -> SpecialRule:
+    values = payload.model_dump()
+    values["id"] = f"special-{uuid4().hex[:12]}"
+    return SpecialRule.model_validate(mysql.insert_special_rule(values))
+
+
+def delete_special_rule(rule_id: str) -> None:
+    mysql.delete_special_rule(rule_id)
+
+
 def update_fee_rule(rule_id: str, payload: FeeRuleUpdate) -> FeeRule:
     values = payload.model_dump(exclude_unset=True)
     return FeeRule.model_validate(mysql.update_fee_rule(rule_id, values))
+
+
+def create_fee_rule(payload: FeeRuleCreate) -> FeeRule:
+    values = payload.model_dump()
+    values["id"] = f"fee-{uuid4().hex[:12]}"
+    return FeeRule.model_validate(mysql.insert_fee_rule(values))
+
+
+def delete_fee_rule(rule_id: str) -> None:
+    mysql.delete_fee_rule(rule_id)
 
 
 def get_translation_rules() -> list[TranslationRule]:
@@ -552,6 +1039,106 @@ def _ensure_formal_quote_allowed(consultant_email: str) -> None:
         and not mysql.has_valid_quote_unlock(consultant_email)
     ):
         raise ValueError("FORMAL_QUOTE_BLOCKED_UNCONVERTED")
+
+
+def _jurisdiction_type_label(value: str) -> str:
+    labels = {
+        "single_country": "单一国家",
+        "special_region": "特殊地区",
+        "regional_office": "区域局",
+        "international_organization": "国际组织",
+        "treaty_entry": "条约体系入口",
+        "internal_business_object": "内部业务对象",
+    }
+    return labels.get(value, value)
+
+
+def _resolve_country(
+    countries: list[dict[str, object]],
+    country_code: str | None,
+) -> dict[str, object] | None:
+    if country_code:
+        for country in countries:
+            if str(country["code"]) == country_code:
+                return country
+        return None
+    return countries[0] if countries else None
+
+
+def _is_enabled_effective(rule: dict[str, object]) -> bool:
+    if not bool(rule.get("enabled")):
+        return False
+    effective_date = rule.get("effective_date")
+    if effective_date is None or effective_date == "":
+        return True
+    if isinstance(effective_date, date):
+        return effective_date <= date.today()
+    try:
+        return date.fromisoformat(str(effective_date)) <= date.today()
+    except ValueError:
+        return True
+
+
+def _entity_type_options(
+    rules: list[dict[str, object]],
+    country_code: str,
+    application_type: str,
+    filing_route: str,
+) -> list[str]:
+    matched_rules = [
+        rule
+        for rule in rules
+        if bool(rule.get("enabled"))
+        and str(rule["country_code"]) == country_code
+        and str(rule["application_type"]) == application_type
+        and str(rule.get("filing_route") or "") in {"", filing_route}
+    ]
+    values: list[str] = []
+    for rule in matched_rules:
+        values.extend(str(item) for item in rule.get("entity_types", []) if str(item))
+    return _unique_strings(values)
+
+
+def _validate_workbench_selection(
+    *,
+    country_code: str,
+    application_type: str,
+    filing_route: str,
+    pct_route_detail: str,
+    entity_type: str,
+) -> None:
+    config = mysql.fetch_country_config()
+    path_rules = [
+        rule
+        for rule in config["path_rules"]
+        if str(rule["country_code"]) == country_code and _is_enabled_effective(rule)
+    ]
+    if not path_rules:
+        return
+
+    matched_path_rules = [
+        rule
+        for rule in path_rules
+        if str(rule["application_type"]) == application_type
+        and str(rule["filing_route"]) == filing_route
+    ]
+    if not matched_path_rules:
+        raise ValueError("INVALID_WORKBENCH_SELECTION")
+
+    route_details = _unique_strings(
+        rule["route_detail"] for rule in matched_path_rules if str(rule.get("route_detail") or "")
+    )
+    if route_details and pct_route_detail not in route_details:
+        raise ValueError("INVALID_WORKBENCH_ROUTE_DETAIL")
+
+    entity_types = _entity_type_options(
+        config["entity_type_rules"],
+        country_code,
+        application_type,
+        filing_route,
+    )
+    if entity_types and entity_type and entity_type not in entity_types:
+        raise ValueError("INVALID_WORKBENCH_ENTITY_TYPE")
 
 
 def _unique_strings(values) -> list[str]:

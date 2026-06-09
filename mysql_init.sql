@@ -33,6 +33,47 @@ CREATE TABLE IF NOT EXISTS countries (
   updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
+CREATE TABLE IF NOT EXISTS customers (
+  id VARCHAR(36) PRIMARY KEY,
+  customer_no VARCHAR(50) NOT NULL UNIQUE,
+  name VARCHAR(255) NOT NULL,
+  customer_type VARCHAR(50) NOT NULL DEFAULT '企业',
+  consultant_id VARCHAR(36) NULL,
+  consultant_email VARCHAR(255) NOT NULL DEFAULT '',
+  consultant_name VARCHAR(100) NOT NULL DEFAULT '',
+  department VARCHAR(100) NOT NULL DEFAULT '',
+  default_currency VARCHAR(10) NOT NULL DEFAULT 'CNY',
+  default_quote_terms TEXT NULL,
+  customer_level VARCHAR(50) NOT NULL DEFAULT '普通',
+  status ENUM('active', 'inactive') NOT NULL DEFAULT 'active',
+  remark TEXT NULL,
+  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  KEY idx_customers_consultant_email (consultant_email, status, updated_at),
+  KEY idx_customers_name (name),
+  CONSTRAINT fk_customers_consultant
+    FOREIGN KEY (consultant_id) REFERENCES users(id)
+    ON DELETE SET NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS customer_contacts (
+  id VARCHAR(64) PRIMARY KEY,
+  customer_id VARCHAR(36) NOT NULL,
+  name VARCHAR(100) NOT NULL,
+  title VARCHAR(100) NOT NULL DEFAULT '',
+  email VARCHAR(255) NOT NULL DEFAULT '',
+  phone VARCHAR(100) NOT NULL DEFAULT '',
+  wechat VARCHAR(100) NOT NULL DEFAULT '',
+  is_primary TINYINT(1) NOT NULL DEFAULT 0,
+  remark VARCHAR(500) NOT NULL DEFAULT '',
+  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  KEY idx_customer_contacts_customer (customer_id, is_primary),
+  CONSTRAINT fk_customer_contacts_customer
+    FOREIGN KEY (customer_id) REFERENCES customers(id)
+    ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
 CREATE TABLE IF NOT EXISTS fee_rule_versions (
   id VARCHAR(64) PRIMARY KEY,
   version_name VARCHAR(100) NOT NULL,
@@ -392,6 +433,64 @@ ON DUPLICATE KEY UPDATE
   role = VALUES(role),
   status = VALUES(status);
 
+INSERT INTO customers (
+  id, customer_no, name, customer_type, consultant_id, consultant_email,
+  consultant_name, department, default_currency, default_quote_terms,
+  customer_level, status, remark
+)
+VALUES
+  (
+    'cust-demo-zyip',
+    'C20260606-ZYIP-DEMO',
+    '智造未来科技有限公司',
+    '企业',
+    'u-consultant',
+    'suri@example.com',
+    'Suri',
+    '知识产权部',
+    'USD',
+    '报价有效期 30 天；官方费用、外所费用或汇率发生变化时，以最新确认为准。',
+    '重点',
+    'active',
+    '初始化演示客户'
+  )
+ON DUPLICATE KEY UPDATE
+  name = VALUES(name),
+  customer_type = VALUES(customer_type),
+  consultant_id = VALUES(consultant_id),
+  consultant_email = VALUES(consultant_email),
+  consultant_name = VALUES(consultant_name),
+  department = VALUES(department),
+  default_currency = VALUES(default_currency),
+  default_quote_terms = VALUES(default_quote_terms),
+  customer_level = VALUES(customer_level),
+  status = VALUES(status),
+  remark = VALUES(remark);
+
+INSERT INTO customer_contacts (
+  id, customer_id, name, title, email, phone, wechat, is_primary, remark
+)
+VALUES
+  (
+    'cust-demo-zyip-contact-001',
+    'cust-demo-zyip',
+    'Lina',
+    'IP Manager',
+    'lina@example.com',
+    '',
+    '',
+    1,
+    '默认联系人'
+  )
+ON DUPLICATE KEY UPDATE
+  name = VALUES(name),
+  title = VALUES(title),
+  email = VALUES(email),
+  phone = VALUES(phone),
+  wechat = VALUES(wechat),
+  is_primary = VALUES(is_primary),
+  remark = VALUES(remark);
+
 INSERT INTO countries (
   code, name_cn, name_en, default_currency, application_language,
   application_cycle, has_substantive_examination, application_types_json,
@@ -400,7 +499,7 @@ INSERT INTO countries (
 )
 VALUES
   ('US', '美国', 'United States', 'USD', '英文', '12-36个月', 1, JSON_ARRAY('发明', '外观'), 1, JSON_ARRAY('大实体', '小实体', '微实体'), 1, JSON_ARRAY('30个月进入', '31个月进入'), 1),
-  ('EP', '欧洲', 'Europe', 'EUR', '英文/法文/德文', '24-48个月', 1, JSON_ARRAY('发明'), 0, NULL, 1, JSON_ARRAY('31个月进入'), 1),
+  ('EP', '欧洲专利局', 'European Patent Office', 'EUR', '英文/法文/德文', '24-48个月', 1, JSON_ARRAY('发明'), 0, NULL, 1, JSON_ARRAY('31个月进入'), 1),
   ('JP', '日本', 'Japan', 'JPY', '日文', '18-36个月', 1, JSON_ARRAY('发明', '实用新型', '外观'), 0, NULL, 0, NULL, 1),
   ('KR', '韩国', 'Korea', 'KRW', '韩文', '18-36个月', 1, JSON_ARRAY('发明', '实用新型', '外观'), 0, NULL, 0, NULL, 1)
 ON DUPLICATE KEY UPDATE

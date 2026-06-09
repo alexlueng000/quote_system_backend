@@ -14,7 +14,9 @@ from app.services.quotation_service import (
     create_quotation_draft,
     create_quotation_from_drafts,
     delete_quotation_draft_item,
+    fetch_quote_jurisdiction_options_preview,
     generate_quotation,
+    get_workbench_options,
     update_quotation_status,
     update_quotation_draft,
 )
@@ -57,6 +59,257 @@ def test_generate_quotation_contains_translation_in_application_stage(monkeypatc
     translation_items = [item for item in generated.items if item.fee_type == "翻译费"]
     assert translation_items
     assert all(item.stage == "申请阶段" for item in translation_items)
+
+
+def test_workbench_options_follow_country_path_and_entity_rules(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "app.services.quotation_service.mysql.fetch_countries",
+        lambda: [
+            {
+                "code": "US",
+                "name_cn": "美国",
+                "name_en": "United States",
+                "default_currency": "USD",
+                "enabled": True,
+            }
+        ],
+    )
+    monkeypatch.setattr(
+        "app.services.quotation_service.mysql.fetch_country_config",
+        lambda: {
+            "countries": [],
+            "path_rules": [
+                {
+                    "id": "path-us-pct",
+                    "country_code": "US",
+                    "application_type": "发明",
+                    "filing_route": "PCT进入",
+                    "route_detail": "30个月",
+                    "enabled": True,
+                    "effective_date": None,
+                },
+                {
+                    "id": "path-us-paris",
+                    "country_code": "US",
+                    "application_type": "发明",
+                    "filing_route": "巴黎公约",
+                    "route_detail": "",
+                    "enabled": True,
+                    "effective_date": None,
+                },
+            ],
+            "entity_type_rules": [
+                {
+                    "id": "entity-us",
+                    "country_code": "US",
+                    "application_type": "发明",
+                    "filing_route": "PCT进入",
+                    "enabled": True,
+                    "entity_types": ["大实体", "小实体"],
+                }
+            ],
+            "language_rules": [],
+            "fx_tax_rules": [],
+            "special_rules": [],
+        },
+    )
+
+    options = get_workbench_options("US", "发明", "PCT进入")
+
+    assert options.country_code == "US"
+    assert options.application_types == ["发明"]
+    assert options.filing_routes == ["PCT进入", "巴黎公约"]
+    assert options.route_details == ["30个月"]
+    assert options.entity_types == ["大实体", "小实体"]
+    assert options.quote_currency == "USD"
+    assert options.has_path_rules is True
+
+
+def test_quote_jurisdiction_preview_filters_and_groups(monkeypatch) -> None:
+    rows = [
+        {
+            "jurisdiction_id": "jur-US",
+            "standard_code": "US",
+            "display_code": "US",
+            "quote_display_name": "美国 (US)",
+            "jurisdiction_type": "single_country",
+            "quote_option_group": "single_country",
+            "quote_business_lines": ["patent", "trademark", "design"],
+            "legacy_country_code": "US",
+            "is_enabled": True,
+            "quote_selectable": True,
+            "not_selectable_reason": None,
+            "geo_region": "North America",
+            "business_economic_regions": ["NORTH_AMERICA"],
+        },
+        {
+            "jurisdiction_id": "jur-EP",
+            "standard_code": "EP",
+            "display_code": "EPO",
+            "quote_display_name": "欧洲专利局 (EPO)",
+            "jurisdiction_type": "regional_office",
+            "quote_option_group": "regional_office",
+            "quote_business_lines": ["patent"],
+            "legacy_country_code": "EP",
+            "is_enabled": True,
+            "quote_selectable": True,
+            "not_selectable_reason": None,
+            "geo_region": "Europe",
+            "business_economic_regions": ["EUROPE"],
+        },
+        {
+            "jurisdiction_id": "jur-EM",
+            "standard_code": "EM",
+            "display_code": "EUIPO",
+            "quote_display_name": "欧盟知识产权局 (EUIPO)",
+            "jurisdiction_type": "regional_office",
+            "quote_option_group": "regional_office",
+            "quote_business_lines": ["trademark", "design"],
+            "legacy_country_code": "EM",
+            "is_enabled": True,
+            "quote_selectable": True,
+            "not_selectable_reason": None,
+            "geo_region": "Europe",
+            "business_economic_regions": ["EUROPE", "EU"],
+        },
+        {
+            "jurisdiction_id": "jur-WO",
+            "standard_code": "WO",
+            "display_code": "WIPO",
+            "quote_display_name": "世界知识产权组织 / WIPO",
+            "jurisdiction_type": "international_organization",
+            "quote_option_group": "international_organization",
+            "quote_business_lines": ["patent"],
+            "legacy_country_code": None,
+            "is_enabled": True,
+            "quote_selectable": True,
+            "not_selectable_reason": None,
+            "geo_region": "",
+            "business_economic_regions": [],
+        },
+        {
+            "jurisdiction_id": "jur-PCT",
+            "standard_code": "PCT",
+            "display_code": "PCT",
+            "quote_display_name": "PCT 国际阶段",
+            "jurisdiction_type": "treaty_entry",
+            "quote_option_group": "treaty_route",
+            "quote_business_lines": ["patent"],
+            "legacy_country_code": None,
+            "is_enabled": True,
+            "quote_selectable": False,
+            "not_selectable_reason": "PCT 国际阶段报价入口，待申请路径模块启用",
+            "geo_region": "",
+            "business_economic_regions": [],
+        },
+        {
+            "jurisdiction_id": "jur-MADRID",
+            "standard_code": "MADRID",
+            "display_code": "MADRID",
+            "quote_display_name": "马德里商标国际注册",
+            "jurisdiction_type": "treaty_entry",
+            "quote_option_group": "treaty_route",
+            "quote_business_lines": ["trademark"],
+            "legacy_country_code": None,
+            "is_enabled": True,
+            "quote_selectable": False,
+            "not_selectable_reason": "商标国际注册路径入口，待申请路径模块启用",
+            "geo_region": "",
+            "business_economic_regions": [],
+        },
+        {
+            "jurisdiction_id": "jur-HAGUE",
+            "standard_code": "HAGUE",
+            "display_code": "HAGUE",
+            "quote_display_name": "海牙外观设计国际注册",
+            "jurisdiction_type": "treaty_entry",
+            "quote_option_group": "treaty_route",
+            "quote_business_lines": ["design"],
+            "legacy_country_code": None,
+            "is_enabled": True,
+            "quote_selectable": False,
+            "not_selectable_reason": "外观设计国际注册路径入口，待申请路径模块启用",
+            "geo_region": "",
+            "business_economic_regions": [],
+        },
+        {
+            "jurisdiction_id": "jur-EUROPE",
+            "standard_code": "EUROPE",
+            "display_code": "EUROPE",
+            "quote_display_name": "欧洲 (EUROPE)",
+            "jurisdiction_type": "internal_business_object",
+            "quote_option_group": "non_quote_region",
+            "quote_business_lines": [],
+            "legacy_country_code": None,
+            "is_enabled": True,
+            "quote_selectable": False,
+            "not_selectable_reason": "欧洲仅作为地理区域或商务/经济区域，不作为报价对象",
+            "geo_region": "Europe",
+            "business_economic_regions": ["EUROPE"],
+        },
+    ]
+
+    def fake_fetch(
+        selectable_only: bool = False,
+        business_line: str | None = None,
+        option_group: str | None = None,
+    ) -> list[dict[str, object]]:
+        result = rows
+        if selectable_only:
+            result = [row for row in result if row["quote_selectable"]]
+        if business_line:
+            result = [row for row in result if business_line in row["quote_business_lines"]]
+        if option_group:
+            result = [row for row in result if row["quote_option_group"] == option_group]
+        return result
+
+    monkeypatch.setattr(
+        "app.services.quotation_service.mysql.fetch_quote_jurisdiction_options_preview",
+        fake_fetch,
+    )
+
+    all_options = fetch_quote_jurisdiction_options_preview()
+    selectable_codes = {
+        option.display_code
+        for option in fetch_quote_jurisdiction_options_preview(selectable_only=True)
+    }
+    patent_codes = {
+        option.display_code
+        for option in fetch_quote_jurisdiction_options_preview(business_line="patent")
+    }
+    trademark_codes = {
+        option.display_code
+        for option in fetch_quote_jurisdiction_options_preview(business_line="trademark")
+    }
+    design_codes = {
+        option.display_code
+        for option in fetch_quote_jurisdiction_options_preview(business_line="design")
+    }
+    single_country_codes = {
+        option.display_code
+        for option in fetch_quote_jurisdiction_options_preview(option_group="single_country")
+    }
+
+    by_code = {option.display_code: option for option in all_options}
+    assert len(all_options) == len(rows)
+    assert "WIPO" in selectable_codes
+    assert "PCT" not in selectable_codes
+    assert by_code["WIPO"].quote_option_group == "international_organization"
+    assert "WIPO" not in single_country_codes
+    assert {"US", "EPO", "WIPO", "PCT"}.issubset(patent_codes)
+    assert "EUIPO" not in patent_codes
+    assert {"US", "EUIPO", "MADRID"}.issubset(trademark_codes)
+    assert "EPO" not in trademark_codes
+    assert {"US", "EUIPO", "HAGUE"}.issubset(design_codes)
+    assert "EPO" not in design_codes
+    assert by_code["PCT"].quote_option_group == "treaty_route"
+    assert by_code["PCT"].not_selectable_reason
+    assert by_code["MADRID"].quote_option_group == "treaty_route"
+    assert by_code["MADRID"].not_selectable_reason
+    assert by_code["HAGUE"].quote_option_group == "treaty_route"
+    assert by_code["HAGUE"].not_selectable_reason
+    assert by_code["EUROPE"].quote_selectable is False
+    assert by_code["EUROPE"].quote_option_group == "non_quote_region"
 
 
 def test_create_quotation_generates_stable_number(monkeypatch) -> None:
@@ -141,6 +394,17 @@ def test_create_quotation_draft_splits_country_items(monkeypatch) -> None:
     monkeypatch.setattr(
         "app.services.quotation_service.mysql.fetch_translation_rules",
         lambda: [],
+    )
+    monkeypatch.setattr(
+        "app.services.quotation_service.mysql.fetch_country_config",
+        lambda: {
+            "countries": [],
+            "path_rules": [],
+            "entity_type_rules": [],
+            "language_rules": [],
+            "fx_tax_rules": [],
+            "special_rules": [],
+        },
     )
 
     def fake_insert(record: dict[str, object], items: list[dict[str, object]]) -> None:
@@ -355,6 +619,22 @@ def test_create_quotation_from_drafts_generates_formal_quote(monkeypatch) -> Non
     monkeypatch.setattr(
         "app.services.quotation_service.mysql.fetch_draft_items_for_formal_quote",
         lambda item_ids: draft_items,
+    )
+    monkeypatch.setattr(
+        "app.services.quotation_service.mysql.refresh_quotation_followup_statuses",
+        lambda: None,
+    )
+    monkeypatch.setattr(
+        "app.services.quotation_service.mysql.count_overdue_followup_quotations",
+        lambda consultant_email, block_days: 0,
+    )
+    monkeypatch.setattr(
+        "app.services.quotation_service.mysql.count_open_unconverted_quotations",
+        lambda consultant_email: 0,
+    )
+    monkeypatch.setattr(
+        "app.services.quotation_service.mysql.has_valid_quote_unlock",
+        lambda consultant_email: False,
     )
 
     def fake_insert(

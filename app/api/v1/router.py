@@ -9,13 +9,41 @@ from app.schemas.quotation import (
     ApprovalRequestResponse,
     ApprovalRequestReview,
     BootstrapResponse,
+    CustomerContactCreate,
+    CustomerContactResponse,
+    CustomerContactUpdate,
+    CustomerCreate,
+    CustomerListResponse,
+    CustomerResponse,
+    CustomerUpdate,
+    Country,
+    CountryBulkFromReferenceRequest,
+    CountryBulkFromReferenceResponse,
+    CountryCreate,
+    CountryConfigResponse,
+    CountryDeleteRequest,
+    CountryPathRule,
+    CountryPathRuleCreate,
+    CountryPathRuleUpdate,
+    CountryUpdate,
+    EntityTypeRule,
+    EntityTypeRuleCreate,
+    EntityTypeRuleUpdate,
     FeeRule,
+    FeeRuleCreate,
     FeeRuleUpdate,
     FollowupCreate,
     FollowupResponse,
+    FxTaxRule,
+    FxTaxRuleCreate,
+    FxTaxRuleUpdate,
     GeneratedQuotation,
+    LanguageRule,
+    LanguageRuleCreate,
+    LanguageRuleUpdate,
     LoginRequest,
     LoginResponse,
+    QuoteJurisdictionOptionPreview,
     QuotationCreate,
     QuotationDraftCreate,
     QuotationDraftListResponse,
@@ -27,23 +55,53 @@ from app.schemas.quotation import (
     QuotationResponse,
     QuotationStatusUpdate,
     StatisticsResponse,
+    SpecialRule,
+    SpecialRuleCreate,
+    SpecialRuleUpdate,
     TranslationRule,
     TranslationRuleUpdate,
     User,
     UserCreate,
     UserPasswordUpdate,
     UserUpdate,
+    WorkbenchOptionsResponse,
+)
+from app.services.customer_service import (
+    create_customer,
+    create_customer_contact,
+    delete_customer_contact,
+    get_customer,
+    get_customers,
+    update_customer,
+    update_customer_contact,
 )
 from app.services.quotation_service import (
     create_approval_request,
+    create_country_config,
+    create_countries_from_reference_bulk,
+    create_country_path_rule,
+    create_entity_type_rule,
+    create_fee_rule,
+    create_fx_tax_rule,
     create_followup as create_followup_record,
+    create_language_rule,
     create_quotation,
     create_quotation_draft,
     create_quotation_from_drafts,
+    create_special_rule,
+    delete_country_config,
+    delete_country_path_rule,
+    delete_entity_type_rule,
+    delete_fee_rule,
+    delete_fx_tax_rule,
+    delete_language_rule,
     delete_quotation_draft_item,
+    delete_special_rule,
+    fetch_quote_jurisdiction_options_preview,
     generate_quotation,
     get_bootstrap,
     get_approval_requests,
+    get_country_config,
     get_fee_rules,
     get_quotation,
     get_quotation_draft,
@@ -51,15 +109,27 @@ from app.services.quotation_service import (
     get_quotations,
     get_statistics,
     get_translation_rules,
+    get_workbench_options,
+    restore_country_config,
     update_quotation_status,
     update_quotation_draft,
     review_approval_request,
+    update_country_config,
+    update_country_path_rule,
+    update_entity_type_rule,
     update_fee_rule,
+    update_fx_tax_rule,
+    update_language_rule,
+    update_special_rule,
     update_translation_rule,
 )
 from app.services.export_service import build_quotation_workbook
+from app.api.v1.ip_systems import router as ip_systems_router
+from app.api.v1.ip_system_query import router as ip_system_query_router
 
 api_router = APIRouter()
+api_router.include_router(ip_systems_router)
+api_router.include_router(ip_system_query_router)
 
 
 def get_current_user(
@@ -83,13 +153,14 @@ def get_current_user(
 def require_admin(
     authorization: str | None = Header(default=None),
     x_user_email: str | None = Header(default=None),
-) -> None:
+) -> dict[str, object]:
     user = get_current_user(authorization, x_user_email)
     if user is None or user["role"] != "admin":
         raise HTTPException(
             status_code=403,
             detail={"code": "ADMIN_REQUIRED", "message": "Admin permission required"},
         )
+    return user
 
 
 def require_consultant(
@@ -218,6 +289,144 @@ async def bootstrap() -> BootstrapResponse:
     return get_bootstrap()
 
 
+@api_router.get("/customers")
+async def list_customers(
+    keyword: str | None = Query(default=None),
+    authorization: str | None = Header(default=None),
+    x_user_email: str | None = Header(default=None),
+) -> CustomerListResponse:
+    current_user = require_quote_user(authorization=authorization, x_user_email=x_user_email)
+    return get_customers(current_user, keyword=keyword)
+
+
+@api_router.post("/customers")
+async def post_customer(
+    payload: CustomerCreate,
+    authorization: str | None = Header(default=None),
+    x_user_email: str | None = Header(default=None),
+) -> CustomerResponse:
+    current_user = require_quote_user(authorization=authorization, x_user_email=x_user_email)
+    try:
+        return create_customer(payload, current_user)
+    except KeyError as exc:
+        raise HTTPException(
+            status_code=404,
+            detail={"code": "CONSULTANT_NOT_FOUND", "message": "Consultant not found"},
+        ) from exc
+
+
+@api_router.get("/customers/{customer_id}")
+async def retrieve_customer(
+    customer_id: str,
+    authorization: str | None = Header(default=None),
+    x_user_email: str | None = Header(default=None),
+) -> CustomerResponse:
+    current_user = require_quote_user(authorization=authorization, x_user_email=x_user_email)
+    try:
+        return get_customer(customer_id, current_user)
+    except PermissionError as exc:
+        raise HTTPException(
+            status_code=403,
+            detail={"code": "CUSTOMER_FORBIDDEN", "message": "Customer access forbidden"},
+        ) from exc
+    except KeyError as exc:
+        raise HTTPException(
+            status_code=404,
+            detail={"code": "CUSTOMER_NOT_FOUND", "message": "Customer not found"},
+        ) from exc
+
+
+@api_router.patch("/customers/{customer_id}")
+async def patch_customer(
+    customer_id: str,
+    payload: CustomerUpdate,
+    authorization: str | None = Header(default=None),
+    x_user_email: str | None = Header(default=None),
+) -> CustomerResponse:
+    current_user = require_quote_user(authorization=authorization, x_user_email=x_user_email)
+    try:
+        return update_customer(customer_id, payload, current_user)
+    except PermissionError as exc:
+        raise HTTPException(
+            status_code=403,
+            detail={"code": "CUSTOMER_FORBIDDEN", "message": "Customer access forbidden"},
+        ) from exc
+    except KeyError as exc:
+        message = str(exc)
+        code = "CONSULTANT_NOT_FOUND" if "CONSULTANT_NOT_FOUND" in message else "CUSTOMER_NOT_FOUND"
+        raise HTTPException(
+            status_code=404,
+            detail={"code": code, "message": "Customer or consultant not found"},
+        ) from exc
+
+
+@api_router.post("/customers/{customer_id}/contacts")
+async def post_customer_contact(
+    customer_id: str,
+    payload: CustomerContactCreate,
+    authorization: str | None = Header(default=None),
+    x_user_email: str | None = Header(default=None),
+) -> CustomerContactResponse:
+    current_user = require_quote_user(authorization=authorization, x_user_email=x_user_email)
+    try:
+        return create_customer_contact(customer_id, payload, current_user)
+    except PermissionError as exc:
+        raise HTTPException(
+            status_code=403,
+            detail={"code": "CUSTOMER_FORBIDDEN", "message": "Customer access forbidden"},
+        ) from exc
+    except KeyError as exc:
+        raise HTTPException(
+            status_code=404,
+            detail={"code": "CUSTOMER_NOT_FOUND", "message": "Customer not found"},
+        ) from exc
+
+
+@api_router.patch("/customers/{customer_id}/contacts/{contact_id}")
+async def patch_customer_contact(
+    customer_id: str,
+    contact_id: str,
+    payload: CustomerContactUpdate,
+    authorization: str | None = Header(default=None),
+    x_user_email: str | None = Header(default=None),
+) -> CustomerContactResponse:
+    current_user = require_quote_user(authorization=authorization, x_user_email=x_user_email)
+    try:
+        return update_customer_contact(customer_id, contact_id, payload, current_user)
+    except PermissionError as exc:
+        raise HTTPException(
+            status_code=403,
+            detail={"code": "CUSTOMER_FORBIDDEN", "message": "Customer access forbidden"},
+        ) from exc
+    except KeyError as exc:
+        raise HTTPException(
+            status_code=404,
+            detail={"code": "CUSTOMER_CONTACT_NOT_FOUND", "message": "Customer contact not found"},
+        ) from exc
+
+
+@api_router.delete("/customers/{customer_id}/contacts/{contact_id}")
+async def delete_contact(
+    customer_id: str,
+    contact_id: str,
+    authorization: str | None = Header(default=None),
+    x_user_email: str | None = Header(default=None),
+) -> CustomerResponse:
+    current_user = require_quote_user(authorization=authorization, x_user_email=x_user_email)
+    try:
+        return delete_customer_contact(customer_id, contact_id, current_user)
+    except PermissionError as exc:
+        raise HTTPException(
+            status_code=403,
+            detail={"code": "CUSTOMER_FORBIDDEN", "message": "Customer access forbidden"},
+        ) from exc
+    except KeyError as exc:
+        raise HTTPException(
+            status_code=404,
+            detail={"code": "CUSTOMER_CONTACT_NOT_FOUND", "message": "Customer contact not found"},
+        ) from exc
+
+
 @api_router.get("/users")
 async def list_users(
     authorization: str | None = Header(default=None),
@@ -298,6 +507,28 @@ async def generate(payload: QuotationGenerateRequest) -> GeneratedQuotation:
     return generate_quotation(payload)
 
 
+@api_router.get("/quotation-workbench/options")
+async def quotation_workbench_options(
+    country_code: str | None = Query(default=None),
+    application_type: str | None = Query(default=None),
+    filing_route: str | None = Query(default=None),
+) -> WorkbenchOptionsResponse:
+    return get_workbench_options(country_code, application_type, filing_route)
+
+
+@api_router.get("/quote/jurisdiction-options-preview")
+async def quote_jurisdiction_options_preview(
+    selectable_only: bool = Query(default=False),
+    business_line: str | None = Query(default=None),
+    option_group: str | None = Query(default=None),
+) -> list[QuoteJurisdictionOptionPreview]:
+    return fetch_quote_jurisdiction_options_preview(
+        selectable_only=selectable_only,
+        business_line=business_line,
+        option_group=option_group,
+    )
+
+
 @api_router.post("/quotations")
 async def create(
     payload: QuotationCreate,
@@ -317,6 +548,17 @@ async def create_draft(
     current_user = require_quote_user(authorization=authorization, x_user_email=x_user_email)
     try:
         return create_quotation_draft(payload, current_user)
+    except ValueError as exc:
+        code = str(exc)
+        message_by_code = {
+            "INVALID_WORKBENCH_SELECTION": "Selected country, application type and filing route are not allowed",
+            "INVALID_WORKBENCH_ROUTE_DETAIL": "Selected route detail is not allowed",
+            "INVALID_WORKBENCH_ENTITY_TYPE": "Selected entity type is not allowed",
+        }
+        raise HTTPException(
+            status_code=400,
+            detail={"code": code, "message": message_by_code.get(code, "Invalid workbench selection")},
+        ) from exc
     except KeyError as exc:
         message = str(exc)
         if "COUNTRY_NOT_FOUND" in message:
@@ -578,6 +820,353 @@ async def statistics(
     )
 
 
+@api_router.get("/country-config")
+async def retrieve_country_config(
+    include_deleted: bool = Query(default=False),
+    authorization: str | None = Header(default=None),
+    x_user_email: str | None = Header(default=None),
+) -> CountryConfigResponse:
+    require_admin(authorization=authorization, x_user_email=x_user_email)
+    return get_country_config(include_deleted=include_deleted)
+
+
+@api_router.post("/countries")
+async def post_country_config(
+    payload: CountryCreate,
+    authorization: str | None = Header(default=None),
+    x_user_email: str | None = Header(default=None),
+) -> Country:
+    current_user = require_admin(authorization=authorization, x_user_email=x_user_email)
+    try:
+        return create_country_config(payload, current_user)
+    except IntegrityError as exc:
+        raise HTTPException(
+            status_code=409,
+            detail={"code": "COUNTRY_EXISTS", "message": "Country already exists"},
+        ) from exc
+    except KeyError as exc:
+        raise HTTPException(
+            status_code=404,
+            detail={"code": "JURISDICTION_REFERENCE_NOT_FOUND", "message": "Jurisdiction reference not found"},
+        ) from exc
+
+
+@api_router.post("/countries/bulk-from-reference")
+async def post_countries_bulk_from_reference(
+    payload: CountryBulkFromReferenceRequest,
+    authorization: str | None = Header(default=None),
+    x_user_email: str | None = Header(default=None),
+) -> CountryBulkFromReferenceResponse:
+    current_user = require_admin(authorization=authorization, x_user_email=x_user_email)
+    return create_countries_from_reference_bulk(payload, current_user)
+
+
+@api_router.patch("/countries/{country_code}")
+async def patch_country_config(
+    country_code: str,
+    payload: CountryUpdate,
+    authorization: str | None = Header(default=None),
+    x_user_email: str | None = Header(default=None),
+) -> Country:
+    require_admin(authorization=authorization, x_user_email=x_user_email)
+    try:
+        return update_country_config(country_code, payload)
+    except KeyError as exc:
+        raise HTTPException(
+            status_code=404,
+            detail={"code": "COUNTRY_NOT_FOUND", "message": "Country not found"},
+        ) from exc
+
+
+@api_router.delete("/countries/{country_code}")
+async def delete_country_config_route(
+    country_code: str,
+    payload: CountryDeleteRequest | None = None,
+    authorization: str | None = Header(default=None),
+    x_user_email: str | None = Header(default=None),
+) -> dict[str, bool]:
+    current_user = require_admin(authorization=authorization, x_user_email=x_user_email)
+    try:
+        delete_country_config(country_code, payload.delete_reason if payload else "", current_user)
+        return {"deleted": True}
+    except KeyError as exc:
+        raise HTTPException(
+            status_code=404,
+            detail={"code": "COUNTRY_NOT_FOUND", "message": "Country not found"},
+        ) from exc
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=409,
+            detail={"code": "COUNTRY_HAS_BUSINESS_REFERENCES", "message": str(exc)},
+        ) from exc
+
+
+@api_router.patch("/countries/{country_code}/restore")
+async def restore_country_config_route(
+    country_code: str,
+    authorization: str | None = Header(default=None),
+    x_user_email: str | None = Header(default=None),
+) -> Country:
+    current_user = require_admin(authorization=authorization, x_user_email=x_user_email)
+    try:
+        return restore_country_config(country_code, current_user)
+    except KeyError as exc:
+        raise HTTPException(
+            status_code=404,
+            detail={"code": "COUNTRY_NOT_FOUND", "message": "Country not found"},
+        ) from exc
+
+
+@api_router.patch("/country-path-rules/{rule_id}")
+async def patch_country_path_rule(
+    rule_id: str,
+    payload: CountryPathRuleUpdate,
+    authorization: str | None = Header(default=None),
+    x_user_email: str | None = Header(default=None),
+) -> CountryPathRule:
+    require_admin(authorization=authorization, x_user_email=x_user_email)
+    try:
+        return update_country_path_rule(rule_id, payload)
+    except KeyError as exc:
+        raise HTTPException(
+            status_code=404,
+            detail={"code": "COUNTRY_PATH_RULE_NOT_FOUND", "message": "Country path rule not found"},
+        ) from exc
+
+
+@api_router.post("/country-path-rules")
+async def post_country_path_rule(
+    payload: CountryPathRuleCreate,
+    authorization: str | None = Header(default=None),
+    x_user_email: str | None = Header(default=None),
+) -> CountryPathRule:
+    require_admin(authorization=authorization, x_user_email=x_user_email)
+    try:
+        return create_country_path_rule(payload)
+    except IntegrityError as exc:
+        raise HTTPException(
+            status_code=409,
+            detail={"code": "COUNTRY_PATH_RULE_CONFLICT", "message": "Country path rule conflict"},
+        ) from exc
+
+
+@api_router.delete("/country-path-rules/{rule_id}")
+async def remove_country_path_rule(
+    rule_id: str,
+    authorization: str | None = Header(default=None),
+    x_user_email: str | None = Header(default=None),
+) -> dict[str, bool]:
+    require_admin(authorization=authorization, x_user_email=x_user_email)
+    try:
+        delete_country_path_rule(rule_id)
+    except KeyError as exc:
+        raise HTTPException(
+            status_code=404,
+            detail={"code": "COUNTRY_PATH_RULE_NOT_FOUND", "message": "Country path rule not found"},
+        ) from exc
+    return {"deleted": True}
+
+
+@api_router.patch("/entity-type-rules/{rule_id}")
+async def patch_entity_type_rule(
+    rule_id: str,
+    payload: EntityTypeRuleUpdate,
+    authorization: str | None = Header(default=None),
+    x_user_email: str | None = Header(default=None),
+) -> EntityTypeRule:
+    require_admin(authorization=authorization, x_user_email=x_user_email)
+    try:
+        return update_entity_type_rule(rule_id, payload)
+    except KeyError as exc:
+        raise HTTPException(
+            status_code=404,
+            detail={"code": "ENTITY_TYPE_RULE_NOT_FOUND", "message": "Entity type rule not found"},
+        ) from exc
+
+
+@api_router.post("/entity-type-rules")
+async def post_entity_type_rule(
+    payload: EntityTypeRuleCreate,
+    authorization: str | None = Header(default=None),
+    x_user_email: str | None = Header(default=None),
+) -> EntityTypeRule:
+    require_admin(authorization=authorization, x_user_email=x_user_email)
+    try:
+        return create_entity_type_rule(payload)
+    except IntegrityError as exc:
+        raise HTTPException(
+            status_code=409,
+            detail={"code": "ENTITY_TYPE_RULE_CONFLICT", "message": "Entity type rule conflict"},
+        ) from exc
+
+
+@api_router.delete("/entity-type-rules/{rule_id}")
+async def remove_entity_type_rule(
+    rule_id: str,
+    authorization: str | None = Header(default=None),
+    x_user_email: str | None = Header(default=None),
+) -> dict[str, bool]:
+    require_admin(authorization=authorization, x_user_email=x_user_email)
+    try:
+        delete_entity_type_rule(rule_id)
+    except KeyError as exc:
+        raise HTTPException(
+            status_code=404,
+            detail={"code": "ENTITY_TYPE_RULE_NOT_FOUND", "message": "Entity type rule not found"},
+        ) from exc
+    return {"deleted": True}
+
+
+@api_router.patch("/language-rules/{rule_id}")
+async def patch_language_rule(
+    rule_id: str,
+    payload: LanguageRuleUpdate,
+    authorization: str | None = Header(default=None),
+    x_user_email: str | None = Header(default=None),
+) -> LanguageRule:
+    require_admin(authorization=authorization, x_user_email=x_user_email)
+    try:
+        return update_language_rule(rule_id, payload)
+    except KeyError as exc:
+        raise HTTPException(
+            status_code=404,
+            detail={"code": "LANGUAGE_RULE_NOT_FOUND", "message": "Language rule not found"},
+        ) from exc
+
+
+@api_router.post("/language-rules")
+async def post_language_rule(
+    payload: LanguageRuleCreate,
+    authorization: str | None = Header(default=None),
+    x_user_email: str | None = Header(default=None),
+) -> LanguageRule:
+    require_admin(authorization=authorization, x_user_email=x_user_email)
+    try:
+        return create_language_rule(payload)
+    except IntegrityError as exc:
+        raise HTTPException(
+            status_code=409,
+            detail={"code": "LANGUAGE_RULE_CONFLICT", "message": "Language rule conflict"},
+        ) from exc
+
+
+@api_router.delete("/language-rules/{rule_id}")
+async def remove_language_rule(
+    rule_id: str,
+    authorization: str | None = Header(default=None),
+    x_user_email: str | None = Header(default=None),
+) -> dict[str, bool]:
+    require_admin(authorization=authorization, x_user_email=x_user_email)
+    try:
+        delete_language_rule(rule_id)
+    except KeyError as exc:
+        raise HTTPException(
+            status_code=404,
+            detail={"code": "LANGUAGE_RULE_NOT_FOUND", "message": "Language rule not found"},
+        ) from exc
+    return {"deleted": True}
+
+
+@api_router.patch("/fx-tax-rules/{rule_id}")
+async def patch_fx_tax_rule(
+    rule_id: str,
+    payload: FxTaxRuleUpdate,
+    authorization: str | None = Header(default=None),
+    x_user_email: str | None = Header(default=None),
+) -> FxTaxRule:
+    require_admin(authorization=authorization, x_user_email=x_user_email)
+    try:
+        return update_fx_tax_rule(rule_id, payload)
+    except KeyError as exc:
+        raise HTTPException(
+            status_code=404,
+            detail={"code": "FX_TAX_RULE_NOT_FOUND", "message": "FX/tax rule not found"},
+        ) from exc
+
+
+@api_router.post("/fx-tax-rules")
+async def post_fx_tax_rule(
+    payload: FxTaxRuleCreate,
+    authorization: str | None = Header(default=None),
+    x_user_email: str | None = Header(default=None),
+) -> FxTaxRule:
+    require_admin(authorization=authorization, x_user_email=x_user_email)
+    try:
+        return create_fx_tax_rule(payload)
+    except IntegrityError as exc:
+        raise HTTPException(
+            status_code=409,
+            detail={"code": "FX_TAX_RULE_CONFLICT", "message": "FX/tax rule conflict"},
+        ) from exc
+
+
+@api_router.delete("/fx-tax-rules/{rule_id}")
+async def remove_fx_tax_rule(
+    rule_id: str,
+    authorization: str | None = Header(default=None),
+    x_user_email: str | None = Header(default=None),
+) -> dict[str, bool]:
+    require_admin(authorization=authorization, x_user_email=x_user_email)
+    try:
+        delete_fx_tax_rule(rule_id)
+    except KeyError as exc:
+        raise HTTPException(
+            status_code=404,
+            detail={"code": "FX_TAX_RULE_NOT_FOUND", "message": "FX/tax rule not found"},
+        ) from exc
+    return {"deleted": True}
+
+
+@api_router.patch("/special-rules/{rule_id}")
+async def patch_special_rule(
+    rule_id: str,
+    payload: SpecialRuleUpdate,
+    authorization: str | None = Header(default=None),
+    x_user_email: str | None = Header(default=None),
+) -> SpecialRule:
+    require_admin(authorization=authorization, x_user_email=x_user_email)
+    try:
+        return update_special_rule(rule_id, payload)
+    except KeyError as exc:
+        raise HTTPException(
+            status_code=404,
+            detail={"code": "SPECIAL_RULE_NOT_FOUND", "message": "Special rule not found"},
+        ) from exc
+
+
+@api_router.post("/special-rules")
+async def post_special_rule(
+    payload: SpecialRuleCreate,
+    authorization: str | None = Header(default=None),
+    x_user_email: str | None = Header(default=None),
+) -> SpecialRule:
+    require_admin(authorization=authorization, x_user_email=x_user_email)
+    try:
+        return create_special_rule(payload)
+    except IntegrityError as exc:
+        raise HTTPException(
+            status_code=409,
+            detail={"code": "SPECIAL_RULE_CONFLICT", "message": "Special rule conflict"},
+        ) from exc
+
+
+@api_router.delete("/special-rules/{rule_id}")
+async def remove_special_rule(
+    rule_id: str,
+    authorization: str | None = Header(default=None),
+    x_user_email: str | None = Header(default=None),
+) -> dict[str, bool]:
+    require_admin(authorization=authorization, x_user_email=x_user_email)
+    try:
+        delete_special_rule(rule_id)
+    except KeyError as exc:
+        raise HTTPException(
+            status_code=404,
+            detail={"code": "SPECIAL_RULE_NOT_FOUND", "message": "Special rule not found"},
+        ) from exc
+    return {"deleted": True}
+
+
 @api_router.get("/fee-rules")
 async def list_fee_rules(
     authorization: str | None = Header(default=None),
@@ -585,6 +1174,22 @@ async def list_fee_rules(
 ) -> list[FeeRule]:
     require_admin(authorization=authorization, x_user_email=x_user_email)
     return get_fee_rules()
+
+
+@api_router.post("/fee-rules")
+async def post_fee_rule(
+    payload: FeeRuleCreate,
+    authorization: str | None = Header(default=None),
+    x_user_email: str | None = Header(default=None),
+) -> FeeRule:
+    require_admin(authorization=authorization, x_user_email=x_user_email)
+    try:
+        return create_fee_rule(payload)
+    except IntegrityError as exc:
+        raise HTTPException(
+            status_code=409,
+            detail={"code": "FEE_RULE_CONFLICT", "message": "Fee rule conflict"},
+        ) from exc
 
 
 @api_router.patch("/fee-rules/{rule_id}")
@@ -602,6 +1207,23 @@ async def patch_fee_rule(
             status_code=404,
             detail={"code": "FEE_RULE_NOT_FOUND", "message": "Fee rule not found"},
         ) from exc
+
+
+@api_router.delete("/fee-rules/{rule_id}")
+async def remove_fee_rule(
+    rule_id: str,
+    authorization: str | None = Header(default=None),
+    x_user_email: str | None = Header(default=None),
+) -> dict[str, bool]:
+    require_admin(authorization=authorization, x_user_email=x_user_email)
+    try:
+        delete_fee_rule(rule_id)
+    except KeyError as exc:
+        raise HTTPException(
+            status_code=404,
+            detail={"code": "FEE_RULE_NOT_FOUND", "message": "Fee rule not found"},
+        ) from exc
+    return {"deleted": True}
 
 
 @api_router.get("/translation-rules")
