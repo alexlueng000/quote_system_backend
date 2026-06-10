@@ -154,6 +154,53 @@ def test_reference_objects_include_hong_kong_without_treaty_membership(monkeypat
     assert not hk.is_paris_contracting_party
 
 
+def test_reference_object_search_aliases_find_hk_mo_and_eu(monkeypatch) -> None:
+    monkeypatch.setattr(ip_system_query_service, "_master_status_by_codes", lambda codes: {})
+
+    cn_hk_matches = ip_system_query_service._search_reference_objects("中国香港")  # noqa: SLF001
+    hk_matches = ip_system_query_service._search_reference_objects("Hong Kong")  # noqa: SLF001
+    hk_code_matches = ip_system_query_service._search_reference_objects("HK")  # noqa: SLF001
+    hk_punct_matches = ip_system_query_service._search_reference_objects("Hong Kong, China")  # noqa: SLF001
+    cn_mo_matches = ip_system_query_service._search_reference_objects("中国澳门")  # noqa: SLF001
+    mo_matches = ip_system_query_service._search_reference_objects("Macau")  # noqa: SLF001
+    mo_code_matches = ip_system_query_service._search_reference_objects("MO")  # noqa: SLF001
+    eu_matches = ip_system_query_service._search_reference_objects("欧盟")  # noqa: SLF001
+    eu_code_matches = ip_system_query_service._search_reference_objects("EU")  # noqa: SLF001
+
+    assert cn_hk_matches[0].code == "HK"
+    assert hk_matches[0].code == "HK"
+    assert hk_matches[0].has_reference_object
+    assert hk_code_matches[0].code == "HK"
+    assert hk_punct_matches[0].code == "HK"
+    assert cn_mo_matches[0].code == "MO"
+    assert mo_matches[0].code == "MO"
+    assert mo_code_matches[0].code == "MO"
+    assert eu_matches[0].code == "EU"
+    assert eu_code_matches[0].code == "EU"
+
+
+def test_reference_only_membership_query_returns_display_group(monkeypatch) -> None:
+    monkeypatch.setattr(ip_system_query_service, "_jurisdictions_by_ids", lambda ids: {})
+    monkeypatch.setattr(ip_system_query_service, "_display_member_rows", lambda *args, **kwargs: [])
+    monkeypatch.setattr(ip_system_query_service, "_master_status_by_codes", lambda codes: {})
+    hk_reference = next(item for item in ip_system_query_service.list_reference_objects().objects if item.code == "HK")
+    monkeypatch.setattr(ip_system_query_service, "_reference_objects_by_code", lambda codes=None: {"HK": hk_reference})
+
+    groups = ip_system_query_service.get_jurisdiction_memberships_by_codes(
+        jurisdiction_ids=[],
+        jurisdiction_codes=["HK"],
+    )
+
+    assert len(groups) == 1
+    assert groups[0].code == "HK"
+    assert groups[0].name_zh == "中国香港"
+    assert groups[0].object_type_label == "地区 / 特别行政区"
+    assert groups[0].has_reference_object
+    assert not groups[0].memberships
+    assert not groups[0].is_pct_contracting_state
+    assert not groups[0].is_paris_contracting_party
+
+
 def test_check_updates_returns_simple_diffs(monkeypatch) -> None:
     monkeypatch.setattr(
         ip_system_query_service,

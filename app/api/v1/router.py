@@ -38,6 +38,12 @@ from app.schemas.quotation import (
     FxTaxRuleCreate,
     FxTaxRuleUpdate,
     GeneratedQuotation,
+    JurisdictionDataSource,
+    JurisdictionDataSourceCreate,
+    JurisdictionDataSourceUpdate,
+    JurisdictionReferenceListResponse,
+    JurisdictionRegionTag,
+    JurisdictionRegionTagCreate,
     LanguageRule,
     LanguageRuleCreate,
     LanguageRuleUpdate,
@@ -79,6 +85,8 @@ from app.services.quotation_service import (
     create_approval_request,
     create_country_config,
     create_countries_from_reference_bulk,
+    create_jurisdiction_data_source,
+    create_jurisdiction_region_tag,
     create_country_path_rule,
     create_entity_type_rule,
     create_fee_rule,
@@ -98,6 +106,9 @@ from app.services.quotation_service import (
     delete_quotation_draft_item,
     delete_special_rule,
     fetch_quote_jurisdiction_options_preview,
+    list_jurisdiction_data_sources,
+    list_jurisdiction_references,
+    list_jurisdiction_region_tags,
     generate_quotation,
     get_bootstrap,
     get_approval_requests,
@@ -115,6 +126,7 @@ from app.services.quotation_service import (
     update_quotation_draft,
     review_approval_request,
     update_country_config,
+    update_jurisdiction_data_source,
     update_country_path_rule,
     update_entity_type_rule,
     update_fee_rule,
@@ -529,6 +541,74 @@ async def quote_jurisdiction_options_preview(
     )
 
 
+@api_router.get("/jurisdiction-references")
+async def jurisdiction_references(
+    keyword: str = Query(default=""),
+    include_hidden: bool = Query(default=False),
+    authorization: str | None = Header(default=None),
+    x_user_email: str | None = Header(default=None),
+) -> JurisdictionReferenceListResponse:
+    require_admin(authorization=authorization, x_user_email=x_user_email)
+    return list_jurisdiction_references(keyword=keyword, include_hidden=include_hidden)
+
+
+@api_router.get("/jurisdiction-data-sources")
+async def jurisdiction_data_sources(
+    authorization: str | None = Header(default=None),
+    x_user_email: str | None = Header(default=None),
+) -> list[JurisdictionDataSource]:
+    require_admin(authorization=authorization, x_user_email=x_user_email)
+    return list_jurisdiction_data_sources()
+
+
+@api_router.post("/jurisdiction-data-sources")
+async def post_jurisdiction_data_source(
+    payload: JurisdictionDataSourceCreate,
+    authorization: str | None = Header(default=None),
+    x_user_email: str | None = Header(default=None),
+) -> JurisdictionDataSource:
+    require_admin(authorization=authorization, x_user_email=x_user_email)
+    return create_jurisdiction_data_source(payload)
+
+
+@api_router.patch("/jurisdiction-data-sources/{source_id}")
+async def patch_jurisdiction_data_source(
+    source_id: str,
+    payload: JurisdictionDataSourceUpdate,
+    authorization: str | None = Header(default=None),
+    x_user_email: str | None = Header(default=None),
+) -> JurisdictionDataSource:
+    require_admin(authorization=authorization, x_user_email=x_user_email)
+    try:
+        return update_jurisdiction_data_source(source_id, payload)
+    except KeyError as exc:
+        raise HTTPException(
+            status_code=404,
+            detail={"code": "SOURCE_NOT_FOUND", "message": "Data source not found"},
+        ) from exc
+
+
+@api_router.get("/jurisdiction-region-tags")
+async def jurisdiction_region_tags(
+    jurisdiction_id: str | None = Query(default=None),
+    tag_code: str | None = Query(default=None),
+    authorization: str | None = Header(default=None),
+    x_user_email: str | None = Header(default=None),
+) -> list[JurisdictionRegionTag]:
+    require_admin(authorization=authorization, x_user_email=x_user_email)
+    return list_jurisdiction_region_tags(jurisdiction_id=jurisdiction_id, tag_code=tag_code)
+
+
+@api_router.post("/jurisdiction-region-tags")
+async def post_jurisdiction_region_tag(
+    payload: JurisdictionRegionTagCreate,
+    authorization: str | None = Header(default=None),
+    x_user_email: str | None = Header(default=None),
+) -> JurisdictionRegionTag:
+    current_user = require_admin(authorization=authorization, x_user_email=x_user_email)
+    return create_jurisdiction_region_tag(payload, current_user)
+
+
 @api_router.post("/quotations")
 async def create(
     payload: QuotationCreate,
@@ -848,6 +928,11 @@ async def post_country_config(
         raise HTTPException(
             status_code=404,
             detail={"code": "JURISDICTION_REFERENCE_NOT_FOUND", "message": "Jurisdiction reference not found"},
+        ) from exc
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail={"code": str(exc), "message": "Reference is not available for country master"},
         ) from exc
 
 

@@ -13,6 +13,10 @@ def test_quotation_draft_routes_are_registered() -> None:
     assert "/api/v1/quotation-drafts/{draft_id}/items/{item_id}" in paths
     assert "/api/v1/quotation-workbench/options" in paths
     assert "/api/v1/quote/jurisdiction-options-preview" in paths
+    assert "/api/v1/jurisdiction-references" in paths
+    assert "/api/v1/jurisdiction-data-sources" in paths
+    assert "/api/v1/jurisdiction-data-sources/{source_id}" in paths
+    assert "/api/v1/jurisdiction-region-tags" in paths
     assert "/api/v1/quotations/from-drafts" in paths
     assert "/api/v1/fee-rules" in paths
     assert "/api/v1/fee-rules/{rule_id}" in paths

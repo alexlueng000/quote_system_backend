@@ -6,7 +6,7 @@ from decimal import Decimal
 from uuid import uuid4
 
 from app.db import mysql
-from app.reference.jurisdictions import JURISDICTION_REFERENCES, get_jurisdiction_reference
+from app.reference.jurisdictions import JURISDICTION_REFERENCES
 from app.schemas.quotation import (
     ApprovalRequestCreate,
     ApprovalRequestResponse,
@@ -32,6 +32,13 @@ from app.schemas.quotation import (
     FxTaxRuleCreate,
     FxTaxRuleUpdate,
     GeneratedQuotation,
+    JurisdictionDataSource,
+    JurisdictionDataSourceCreate,
+    JurisdictionDataSourceUpdate,
+    JurisdictionReferenceCandidate,
+    JurisdictionReferenceListResponse,
+    JurisdictionRegionTag,
+    JurisdictionRegionTagCreate,
     LanguageRule,
     LanguageRuleCreate,
     LanguageRuleUpdate,
@@ -186,6 +193,62 @@ def fetch_quote_jurisdiction_options_preview(
             option_group=option_group,
         )
     ]
+
+
+def list_jurisdiction_references(
+    keyword: str = "",
+    include_hidden: bool = False,
+) -> JurisdictionReferenceListResponse:
+    rows = mysql.fetch_jurisdiction_reference_registry(keyword=keyword, include_hidden=include_hidden)
+    items = [JurisdictionReferenceCandidate.model_validate(row) for row in rows]
+    return JurisdictionReferenceListResponse(items=items, total=len(items))
+
+
+def get_jurisdiction_reference_candidate(reference_id: str) -> JurisdictionReferenceCandidate | None:
+    row = mysql.fetch_jurisdiction_reference_registry_item(reference_id)
+    return JurisdictionReferenceCandidate.model_validate(row) if row else None
+
+
+def _reference_hidden_or_trademark_only(reference: JurisdictionReferenceCandidate) -> bool:
+    business_scope = {item.lower() for item in reference.business_scope}
+    return (
+        reference.visibility_scope == "reserved_hidden"
+        or reference.reserved_reason == "trademark_reserved"
+        or (business_scope and business_scope <= {"trademark"})
+    )
+
+
+def list_jurisdiction_data_sources() -> list[JurisdictionDataSource]:
+    return [JurisdictionDataSource.model_validate(row) for row in mysql.fetch_jurisdiction_data_sources()]
+
+
+def create_jurisdiction_data_source(payload: JurisdictionDataSourceCreate) -> JurisdictionDataSource:
+    row = mysql.upsert_jurisdiction_data_source(payload.model_dump())
+    return JurisdictionDataSource.model_validate(row)
+
+
+def update_jurisdiction_data_source(source_id: str, payload: JurisdictionDataSourceUpdate) -> JurisdictionDataSource:
+    row = mysql.update_jurisdiction_data_source(source_id, payload.model_dump(exclude_unset=True))
+    return JurisdictionDataSource.model_validate(row)
+
+
+def list_jurisdiction_region_tags(
+    jurisdiction_id: str | None = None,
+    tag_code: str | None = None,
+) -> list[JurisdictionRegionTag]:
+    return [
+        JurisdictionRegionTag.model_validate(row)
+        for row in mysql.fetch_jurisdiction_region_tags(jurisdiction_id=jurisdiction_id, tag_code=tag_code)
+    ]
+
+
+def create_jurisdiction_region_tag(
+    payload: JurisdictionRegionTagCreate,
+    current_user: dict[str, object],
+) -> JurisdictionRegionTag:
+    actor = str(current_user.get("email") or current_user.get("id") or "local_admin")
+    row = mysql.insert_jurisdiction_region_tag(payload.model_dump(), actor=actor)
+    return JurisdictionRegionTag.model_validate(row)
 
 
 def generate_quotation(payload: QuotationGenerateRequest) -> GeneratedQuotation:
@@ -628,13 +691,16 @@ def get_country_config(include_deleted: bool = False) -> CountryConfigResponse:
 
 
 def create_country_config(payload: CountryCreate, current_user: dict[str, object]) -> Country:
-    reference = get_jurisdiction_reference(payload.reference_id)
+    reference = get_jurisdiction_reference_candidate(payload.reference_id)
     if reference is None:
         raise KeyError("JURISDICTION_REFERENCE_NOT_FOUND")
+    if _reference_hidden_or_trademark_only(reference):
+        raise ValueError("REFERENCE_NOT_AVAILABLE_FOR_COUNTRY_MASTER")
     verified_at = payload.last_verified_at or payload.source_verified_at or datetime.now(timezone.utc)
     display_code = payload.display_code.strip() or reference.display_code
     name_cn = payload.name_cn.strip() or reference.name_cn
     name_en = payload.name_en.strip() or reference.name_en
+    enabled = bool(payload.enabled)
     manual_override = (
         payload.manual_override
         or display_code != reference.display_code
@@ -649,6 +715,7 @@ def create_country_config(payload: CountryCreate, current_user: dict[str, object
         "display_code": display_code,
         "name_cn": name_cn,
         "name_en": name_en,
+        "enabled": enabled,
         "country_type": _jurisdiction_type_label(reference.jurisdiction_type),
         "jurisdiction_type": reference.jurisdiction_type,
         "international_region": reference.geo_region,
@@ -659,6 +726,12 @@ def create_country_config(payload: CountryCreate, current_user: dict[str, object
         "source_note": reference.source_note,
         # Legacy compatibility only. Currency rules belong in the FX/tax module.
         "default_currency": reference.default_currency_legacy,
+        "is_enabled": enabled,
+        "quote_selectable": reference.quote_selectable_default,
+        "quote_business_lines_json": json.dumps(reference.business_scope, ensure_ascii=False),
+        "quote_option_group": reference.reference_category,
+        "quote_display_name": f"{name_cn} ({display_code})",
+        "not_selectable_reason": reference.not_selectable_reason,
         "source_verified": True,
         "last_verified_at": verified_at,
         "source_verified_at": verified_at,
@@ -692,7 +765,7 @@ def create_countries_from_reference_bulk(
             continue
         seen_reference_ids.add(reference_id)
 
-        reference = get_jurisdiction_reference(reference_id)
+        reference = get_jurisdiction_reference_candidate(reference_id)
         if reference is None:
             response.failed.append(
                 CountryBulkFromReferenceResult(
@@ -700,6 +773,20 @@ def create_countries_from_reference_bulk(
                     status="failed",
                     existence_status="not_exists",
                     reason="本地 reference 不存在或已停用",
+                )
+            )
+            continue
+        if _reference_hidden_or_trademark_only(reference):
+            response.skipped.append(
+                CountryBulkFromReferenceResult(
+                    reference_id=reference.reference_id,
+                    standard_code=reference.standard_code,
+                    display_code=reference.display_code,
+                    name_cn=reference.name_cn,
+                    name_en=reference.name_en,
+                    status="skipped",
+                    existence_status="hidden_or_trademark_only",
+                    reason="商标或隐藏 reference 默认不可见、不可选，已跳过",
                 )
             )
             continue
@@ -861,18 +948,19 @@ def restore_country_config(country_code: str, current_user: dict[str, object]) -
     verified_at = datetime.now(timezone.utc)
     verified_by = str(current_user.get("email") or current_user.get("id") or "local_admin")
     if reference is not None:
+        jurisdiction_type = "special_region" if code in {"HK", "MO", "TW"} else reference.jurisdiction_type
         record = {
             "code": reference.standard_code,
             "name_cn": reference.name_cn,
             "name_en": reference.name_en,
             "enabled": True,
             "business_region": list(reference.default_business_economic_regions),
-            "country_type": _jurisdiction_type_label(reference.jurisdiction_type),
+            "country_type": _jurisdiction_type_label(jurisdiction_type),
             "default_currency": reference.default_currency_legacy,
             "internal_code": reference.standard_code,
             "standard_code": reference.standard_code,
             "display_code": reference.display_code,
-            "jurisdiction_type": reference.jurisdiction_type,
+            "jurisdiction_type": jurisdiction_type,
             "is_enabled": True,
             "international_region": reference.geo_region,
             "source_name": reference.source_name,

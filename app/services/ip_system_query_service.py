@@ -184,6 +184,31 @@ REFERENCE_EXTRA_OBJECTS = [
     ("IM", "马恩岛", "Isle of Man", "region", "地区 / 特别行政区"),
     ("JE", "泽西", "Jersey", "region", "地区 / 特别行政区"),
 ]
+REFERENCE_SEARCH_ALIASES = {
+    "HK": {
+        "HK",
+        "香港",
+        "中國香港",
+        "中国香港",
+        "HONG KONG",
+        "HONG KONG CHINA",
+        "HONG KONG, CHINA",
+    },
+    "MO": {
+        "MO",
+        "澳门",
+        "澳門",
+        "中國澳門",
+        "中国澳门",
+        "MACAO",
+        "MACAU",
+        "MACAO CHINA",
+        "MACAU CHINA",
+        "MACAO, CHINA",
+        "MACAU, CHINA",
+    },
+    "EU": {"EU", "欧盟", "歐盟", "欧洲联盟", "歐洲聯盟", "EUROPEAN UNION"},
+}
 
 
 @dataclass(frozen=True)
@@ -306,6 +331,35 @@ def search_jurisdictions(keyword: str) -> list[IpSystemJurisdictionOption]:
         option = _jurisdiction_option(row)
         if option.code.upper() not in seen_codes:
             options.append(option)
+            seen_codes.add(option.code.upper())
+    reference_options = _search_reference_objects(value)
+    exact_reference_options = [
+        option for option in reference_options if _is_exact_reference_query(value, option.code)
+    ]
+    fuzzy_reference_options = [
+        option for option in reference_options if option.code not in {item.code for item in exact_reference_options}
+    ]
+    for option in reversed(exact_reference_options):
+        option_code = option.code.upper()
+        if option_code not in seen_codes:
+            options.insert(0, option)
+            seen_codes.add(option_code)
+        else:
+            options = [
+                _merge_reference_option(existing, option) if existing.code.upper() == option_code else existing
+                for existing in options
+            ]
+            options.sort(key=lambda item: 0 if item.code.upper() == option_code else 1)
+    for option in fuzzy_reference_options:
+        option_code = option.code.upper()
+        if option_code not in seen_codes:
+            options.append(option)
+            seen_codes.add(option_code)
+        else:
+            options = [
+                _merge_reference_option(existing, option) if existing.code.upper() == option_code else existing
+                for existing in options
+            ]
     return options[:30]
 
 
@@ -334,6 +388,7 @@ def get_jurisdiction_memberships_by_codes(
     for row in rows:
         rows_by_code.setdefault(str(row["jurisdiction_code"]).upper(), []).append(row)
     master_map = _master_status_by_codes(requested_codes)
+    reference_map = _reference_objects_by_code(requested_codes)
     groups: list[IpSystemJurisdictionMembershipGroup] = []
     for jurisdiction_id in cleaned_ids:
         jurisdiction = jurisdictions.get(jurisdiction_id)
@@ -341,14 +396,16 @@ def get_jurisdiction_memberships_by_codes(
             continue
         code = str(jurisdiction.get("display_code") or jurisdiction.get("internal_code") or "").upper()
         master = master_map.get(code)
+        reference = reference_map.get(code)
         groups.append(
             IpSystemJurisdictionMembershipGroup(
                 jurisdiction_id=jurisdiction_id,
                 code=code,
-                name_zh=str(jurisdiction.get("name_cn") or ""),
-                name_en=str(jurisdiction.get("name_en") or ""),
+                name_zh=str(jurisdiction.get("name_cn") or (reference.name_zh if reference else "") or ""),
+                name_en=str(jurisdiction.get("name_en") or (reference.name_en if reference else "") or ""),
                 master_status=master["status"] if master else "missing",
                 master_status_label=master["label"] if master else "未录入主档",
+                **_reference_group_fields(reference),
                 memberships=[
                     _membership_from_official_row(row)
                     for row in rows_by_code.get(code, [])
@@ -360,18 +417,20 @@ def get_jurisdiction_memberships_by_codes(
         if code in grouped_existing_codes:
             continue
         code_rows = rows_by_code.get(code, [])
-        if not code_rows:
+        reference = reference_map.get(code)
+        if not code_rows and not reference:
             continue
         master = master_map.get(code)
-        first = code_rows[0]
+        first = code_rows[0] if code_rows else {}
         groups.append(
             IpSystemJurisdictionMembershipGroup(
                 jurisdiction_id=master.get("jurisdiction_id") if master else None,
                 code=code,
-                name_zh=str((first.get("name_zh") or (master.get("name_zh") if master else "")) or ""),
-                name_en=str((first.get("name_en") or (master.get("name_en") if master else "")) or ""),
+                name_zh=str((first.get("name_zh") or (master.get("name_zh") if master else "") or (reference.name_zh if reference else "")) or ""),
+                name_en=str((first.get("name_en") or (master.get("name_en") if master else "") or (reference.name_en if reference else "")) or ""),
                 master_status=master["status"] if master else "missing",
                 master_status_label=master["label"] if master else "未录入主档",
+                **_reference_group_fields(reference),
                 memberships=[_membership_from_official_row(row) for row in code_rows],
             )
         )
@@ -1236,6 +1295,121 @@ def list_reference_objects() -> IpSystemReferenceObjectsResponse:
         reference_count=202,
         objects=objects,
     )
+
+
+def _reference_objects_by_code(codes: list[str] | None = None) -> dict[str, IpSystemReferenceObject]:
+    wanted = {code.strip().upper() for code in (codes or []) if code.strip()}
+    objects = list_reference_objects().objects
+    return {
+        item.code.upper(): item
+        for item in objects
+        if not wanted or item.code.upper() in wanted
+    }
+
+
+def _search_reference_objects(keyword: str) -> list[IpSystemJurisdictionOption]:
+    value = keyword.strip()
+    if not value:
+        return []
+    normalized = _normalize_reference_search_text(value)
+    matches: list[tuple[int, str, IpSystemJurisdictionOption]] = []
+    for item in list_reference_objects().objects:
+        aliases = REFERENCE_SEARCH_ALIASES.get(item.code.upper(), set())
+        normalized_aliases = {_normalize_reference_search_text(alias) for alias in aliases}
+        normalized_code = _normalize_reference_search_text(item.code)
+        normalized_name_zh = _normalize_reference_search_text(item.name_zh)
+        normalized_name_en = _normalize_reference_search_text(item.name_en)
+        haystack = {
+            normalized_code,
+            normalized_name_zh,
+            normalized_name_en,
+            _normalize_reference_search_text(item.object_type_label),
+            *normalized_aliases,
+        }
+        if not any(normalized and normalized in candidate for candidate in haystack):
+            continue
+        if normalized == normalized_code or normalized in normalized_aliases:
+            score = 0
+        elif normalized in {normalized_name_zh, normalized_name_en}:
+            score = 1
+        else:
+            score = 2
+        matches.append((score, item.code, _reference_option(item)))
+    return [option for _, _, option in sorted(matches, key=lambda item: (item[0], item[1]))[:30]]
+
+
+def _reference_option(item: IpSystemReferenceObject) -> IpSystemJurisdictionOption:
+    return IpSystemJurisdictionOption(
+        jurisdiction_id=None,
+        code=item.code,
+        name_zh=item.name_zh,
+        name_en=item.name_en,
+        member_type=item.object_type,
+        master_status=item.master_status,
+        master_status_label=item.master_status_label,
+        matched_system_codes=[],
+        **_reference_group_fields(item),
+    )
+
+
+def _merge_reference_option(
+    option: IpSystemJurisdictionOption,
+    reference_option: IpSystemJurisdictionOption,
+) -> IpSystemJurisdictionOption:
+    data = option.model_dump()
+    reference_data = reference_option.model_dump()
+    for key in (
+        "has_reference_object",
+        "object_type",
+        "object_type_label",
+        "reference_source_name",
+        "reference_profile_url",
+        "reference_system_hint",
+        "is_pct_contracting_state",
+        "is_paris_contracting_party",
+        "epc_relation_type_label",
+        "is_eu_design_covered",
+    ):
+        data[key] = reference_data.get(key)
+    if not data.get("name_zh"):
+        data["name_zh"] = reference_data.get("name_zh", "")
+    if not data.get("name_en"):
+        data["name_en"] = reference_data.get("name_en", "")
+    if not data.get("member_type"):
+        data["member_type"] = reference_data.get("member_type", "")
+    return IpSystemJurisdictionOption(**data)
+
+
+def _is_exact_reference_query(keyword: str, code: str) -> bool:
+    normalized = _normalize_reference_search_text(keyword)
+    normalized_code = code.upper()
+    aliases = {
+        _normalize_reference_search_text(alias)
+        for alias in REFERENCE_SEARCH_ALIASES.get(normalized_code, set())
+    }
+    return normalized == _normalize_reference_search_text(normalized_code) or normalized in aliases
+
+
+def _reference_group_fields(item: IpSystemReferenceObject | None) -> dict[str, object]:
+    if item is None:
+        return {}
+    return {
+        "has_reference_object": True,
+        "object_type": item.object_type,
+        "object_type_label": item.object_type_label,
+        "reference_source_name": "WIPO Lex 参考对象",
+        "reference_profile_url": item.profile_url,
+        "reference_system_hint": item.system_hint,
+        "is_pct_contracting_state": item.is_pct_contracting_state,
+        "is_paris_contracting_party": item.is_paris_contracting_party,
+        "epc_relation_type_label": item.epc_relation_type_label,
+        "is_eu_design_covered": item.is_eu_design_covered,
+    }
+
+
+def _normalize_reference_search_text(value: str) -> str:
+    normalized = unicodedata.normalize("NFKC", value).strip().upper()
+    return re.sub(r"[\s,，、/／()（）.-]+", "", normalized)
 
 
 def _reference_object_hint(

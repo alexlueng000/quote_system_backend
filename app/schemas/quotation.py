@@ -59,6 +59,7 @@ BUSINESS_REGION_TAGS = {
     "AFRICA",
     "ANZ_OCEANIA",
     "SOUTH_ASIA",
+    "BELT_AND_ROAD",
     "OTHER",
 }
 ECONOMIC_ORG_TAGS = {"APEC", "ASEAN", "BRICS", "EU"}
@@ -414,6 +415,155 @@ class CountryBulkFromReferenceResponse(BaseModel):
     restored: list[CountryBulkFromReferenceResult] = Field(default_factory=list)
     skipped: list[CountryBulkFromReferenceResult] = Field(default_factory=list)
     failed: list[CountryBulkFromReferenceResult] = Field(default_factory=list)
+
+
+class JurisdictionReferenceCandidate(BaseModel):
+    reference_id: str
+    jurisdiction_id: str | None = None
+    standard_code: str
+    display_code: str
+    name_cn: str
+    name_en: str
+    aliases: list[str] = Field(default_factory=list)
+    jurisdiction_type: str
+    reference_category: str = "country"
+    business_scope: list[str] = Field(default_factory=list)
+    visibility_scope: str = "country_master_reference"
+    candidate_status: str = "candidate"
+    quote_selectable_default: bool = False
+    not_selectable_reason: str = "未纳入当前报价范围"
+    reserved_reason: str = ""
+    geo_region: str = "Other"
+    default_business_economic_regions: list[str] = Field(default_factory=lambda: ["OTHER"])
+    source_id: str | None = None
+    source_name: str = ""
+    source_url: str = ""
+    source_version: str = ""
+    source_note: str = ""
+    source_verified: bool = False
+    source_verified_at: datetime | None = None
+    source_verified_by: str | None = None
+    last_reviewed_at: datetime | None = None
+    next_review_due_at: datetime | None = None
+    review_status: str = "pending_review"
+    is_active: bool = True
+    default_currency_legacy: str = "USD"
+
+    @field_validator("default_business_economic_regions", mode="before")
+    @classmethod
+    def normalize_reference_business_tags(cls, value: object) -> list[str]:
+        return _normalize_business_tags(value)
+
+
+class JurisdictionReferenceListResponse(BaseModel):
+    items: list[JurisdictionReferenceCandidate]
+    total: int
+
+
+class JurisdictionDataSource(BaseModel):
+    source_id: str
+    source_name: str
+    source_type: str = "manual_verified"
+    source_owner: str = ""
+    source_url: str = ""
+    source_version: str = ""
+    applicable_fields: list[str] = Field(default_factory=list)
+    verification_frequency: str = ""
+    source_note: str = ""
+    source_verified: bool = False
+    source_verified_at: datetime | None = None
+    source_verified_by: str | None = None
+    last_reviewed_at: datetime | None = None
+    next_review_due_at: datetime | None = None
+    review_status: str = "pending_review"
+    is_active: bool = True
+
+
+class JurisdictionDataSourceCreate(BaseModel):
+    source_id: str = Field(min_length=1)
+    source_name: str = Field(min_length=1)
+    source_type: Literal["official", "internal", "third_party", "manual_verified"] = "manual_verified"
+    source_owner: str = ""
+    source_url: str = ""
+    source_version: str = ""
+    applicable_fields: list[str] = Field(default_factory=list)
+    verification_frequency: str = ""
+    source_note: str = ""
+    source_verified: bool = False
+    source_verified_at: datetime | None = None
+    source_verified_by: str | None = None
+    last_reviewed_at: datetime | None = None
+    next_review_due_at: datetime | None = None
+    review_status: Literal["pending_review", "verified", "needs_update", "deprecated"] = "pending_review"
+    is_active: bool = True
+
+
+class JurisdictionDataSourceUpdate(BaseModel):
+    source_name: str | None = Field(default=None, min_length=1)
+    source_type: Literal["official", "internal", "third_party", "manual_verified"] | None = None
+    source_owner: str | None = None
+    source_url: str | None = None
+    source_version: str | None = None
+    applicable_fields: list[str] | None = None
+    verification_frequency: str | None = None
+    source_note: str | None = None
+    source_verified: bool | None = None
+    source_verified_at: datetime | None = None
+    source_verified_by: str | None = None
+    last_reviewed_at: datetime | None = None
+    next_review_due_at: datetime | None = None
+    review_status: Literal["pending_review", "verified", "needs_update", "deprecated"] | None = None
+    is_active: bool | None = None
+
+
+class JurisdictionRegionTag(BaseModel):
+    id: str
+    jurisdiction_id: str
+    jurisdiction_code: str = ""
+    jurisdiction_name_cn: str = ""
+    jurisdiction_name_en: str = ""
+    tag_scheme: str
+    tag_code: str
+    tag_name_cn: str
+    tag_name_en: str = ""
+    source_id: str | None = None
+    source_type: str = "manual_verified"
+    source_name: str = ""
+    source_url: str = ""
+    source_note: str = ""
+    source_verified: bool = False
+    source_verified_at: datetime | None = None
+    source_verified_by: str | None = None
+    last_reviewed_at: datetime | None = None
+    next_review_due_at: datetime | None = None
+    review_status: str = "pending_review"
+    effective_from: date | None = None
+    effective_to: date | None = None
+    is_active: bool = True
+    reason_note: str = ""
+
+
+class JurisdictionRegionTagCreate(BaseModel):
+    jurisdiction_id: str = Field(min_length=1)
+    tag_scheme: str = Field(min_length=1)
+    tag_code: str = Field(min_length=1)
+    tag_name_cn: str = Field(min_length=1)
+    tag_name_en: str = ""
+    source_id: str | None = None
+    source_type: Literal["official", "internal", "third_party", "manual_verified"] = "manual_verified"
+    source_name: str = ""
+    source_url: str = ""
+    source_note: str = ""
+    source_verified: bool = False
+    source_verified_at: datetime | None = None
+    source_verified_by: str | None = None
+    last_reviewed_at: datetime | None = None
+    next_review_due_at: datetime | None = None
+    review_status: Literal["pending_review", "verified", "needs_update", "deprecated"] = "pending_review"
+    effective_from: date | None = None
+    effective_to: date | None = None
+    is_active: bool = True
+    reason_note: str = ""
 
 
 class CountryPathRule(BaseModel):

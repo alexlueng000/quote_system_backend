@@ -71,6 +71,16 @@ class IpSystemJurisdictionOption(BaseModel):
     master_status: str = "missing"
     master_status_label: str = "未录入主档"
     matched_system_codes: list[str] = Field(default_factory=list)
+    has_reference_object: bool = False
+    object_type: str = ""
+    object_type_label: str = ""
+    reference_source_name: str = ""
+    reference_profile_url: str = ""
+    reference_system_hint: str = ""
+    is_pct_contracting_state: bool = False
+    is_paris_contracting_party: bool = False
+    epc_relation_type_label: str = ""
+    is_eu_design_covered: bool = False
 
 
 class IpSystemJurisdictionMembership(BaseModel):
@@ -98,6 +108,16 @@ class IpSystemJurisdictionMembershipGroup(BaseModel):
     name_en: str = ""
     master_status: str = "missing"
     master_status_label: str = "未录入主档"
+    has_reference_object: bool = False
+    object_type: str = ""
+    object_type_label: str = ""
+    reference_source_name: str = ""
+    reference_profile_url: str = ""
+    reference_system_hint: str = ""
+    is_pct_contracting_state: bool = False
+    is_paris_contracting_party: bool = False
+    epc_relation_type_label: str = ""
+    is_eu_design_covered: bool = False
     memberships: list[IpSystemJurisdictionMembership] = Field(default_factory=list)
 
 

@@ -14,6 +14,7 @@ from dotenv import load_dotenv
 from pymysql.connections import Connection
 from pymysql.cursors import DictCursor
 
+from app.reference.jurisdiction_registry import default_registry_items
 from app.schemas.quotation import QuotationItem
 
 
@@ -615,6 +616,255 @@ def fetch_quote_jurisdiction_options_preview(
         return rows
 
 
+def fetch_jurisdiction_reference_registry(
+    keyword: str = "",
+    include_hidden: bool = False,
+) -> list[dict[str, object]]:
+    with connection_scope() as connection, connection.cursor() as cursor:
+        if not _table_exists(cursor, "jurisdiction_reference_registry"):
+            return _fallback_reference_registry(keyword, include_hidden)
+        _seed_reference_registry_if_empty(cursor)
+        where_parts = ["r.is_active = 1"]
+        params: list[object] = []
+        if not include_hidden:
+            where_parts.append("r.visibility_scope <> 'reserved_hidden'")
+        normalized_keyword = keyword.strip()
+        if normalized_keyword:
+            where_parts.append(
+                """
+                (
+                  LOWER(r.standard_code) LIKE LOWER(%s)
+                  OR LOWER(r.display_code) LIKE LOWER(%s)
+                  OR LOWER(r.name_cn) LIKE LOWER(%s)
+                  OR LOWER(r.name_en) LIKE LOWER(%s)
+                  OR LOWER(CAST(r.aliases_json AS CHAR)) LIKE LOWER(%s)
+                )
+                """
+            )
+            like_value = f"%{normalized_keyword}%"
+            params.extend([like_value] * 5)
+        cursor.execute(
+            f"""
+            SELECT r.*, j.jurisdiction_id AS matched_jurisdiction_id
+            FROM jurisdiction_reference_registry r
+            LEFT JOIN jurisdictions j ON j.jurisdiction_id = r.jurisdiction_id
+            WHERE {' AND '.join(where_parts)}
+            ORDER BY
+              CASE r.reference_category
+                WHEN 'country' THEN 1
+                WHEN 'region' THEN 2
+                WHEN 'regional_office' THEN 3
+                WHEN 'international_organization' THEN 4
+                WHEN 'treaty_route' THEN 5
+                ELSE 9
+              END,
+              r.standard_code
+            LIMIT 500
+            """,
+            tuple(params),
+        )
+        rows = _normalize_text_records(cursor.fetchall())
+        return [_reference_registry_row(row) for row in rows]
+
+
+def fetch_jurisdiction_reference_registry_item(reference_id: str) -> dict[str, object] | None:
+    with connection_scope() as connection, connection.cursor() as cursor:
+        if not _table_exists(cursor, "jurisdiction_reference_registry"):
+            for item in _fallback_reference_registry("", include_hidden=True):
+                if item["reference_id"] == reference_id and item["is_active"]:
+                    return item
+            return None
+        _seed_reference_registry_if_empty(cursor)
+        cursor.execute(
+            """
+            SELECT *
+            FROM jurisdiction_reference_registry
+            WHERE reference_id = %s AND is_active = 1
+            LIMIT 1
+            """,
+            (reference_id,),
+        )
+        row = _normalize_text_record(cursor.fetchone())
+        return _reference_registry_row(row) if row else None
+
+
+def fetch_jurisdiction_data_sources() -> list[dict[str, object]]:
+    with connection_scope() as connection, connection.cursor() as cursor:
+        if not _table_exists(cursor, "jurisdiction_data_source_registry"):
+            return []
+        cursor.execute(
+            """
+            SELECT *
+            FROM jurisdiction_data_source_registry
+            ORDER BY is_active DESC, review_status, source_id
+            """
+        )
+        return [_data_source_row(row) for row in _normalize_text_records(cursor.fetchall())]
+
+
+def upsert_jurisdiction_data_source(values: dict[str, object]) -> dict[str, object]:
+    with connection_scope() as connection, connection.cursor() as cursor:
+        if not _table_exists(cursor, "jurisdiction_data_source_registry"):
+            raise RuntimeError("jurisdiction_data_source_registry is not available")
+        record = dict(values)
+        record["applicable_fields_json"] = json.dumps(record.pop("applicable_fields", []), ensure_ascii=False)
+        columns = [
+            "source_id",
+            "source_name",
+            "source_type",
+            "source_owner",
+            "source_url",
+            "source_version",
+            "applicable_fields_json",
+            "verification_frequency",
+            "source_note",
+            "source_verified",
+            "source_verified_at",
+            "source_verified_by",
+            "last_reviewed_at",
+            "next_review_due_at",
+            "review_status",
+            "is_active",
+        ]
+        placeholders = ", ".join(f"%({column})s" for column in columns)
+        updates = ", ".join(f"{column} = VALUES({column})" for column in columns if column != "source_id")
+        cursor.execute(
+            f"""
+            INSERT INTO jurisdiction_data_source_registry ({', '.join(columns)})
+            VALUES ({placeholders})
+            ON DUPLICATE KEY UPDATE {updates}
+            """,
+            {column: record.get(column) for column in columns},
+        )
+    sources = fetch_jurisdiction_data_sources()
+    source_id = str(values["source_id"])
+    for source in sources:
+        if source["source_id"] == source_id:
+            return source
+    raise KeyError(source_id)
+
+
+def update_jurisdiction_data_source(source_id: str, values: dict[str, object]) -> dict[str, object]:
+    allowed = {
+        "source_name",
+        "source_type",
+        "source_owner",
+        "source_url",
+        "source_version",
+        "applicable_fields",
+        "verification_frequency",
+        "source_note",
+        "source_verified",
+        "source_verified_at",
+        "source_verified_by",
+        "last_reviewed_at",
+        "next_review_due_at",
+        "review_status",
+        "is_active",
+    }
+    updates = {key: value for key, value in values.items() if key in allowed}
+    if "applicable_fields" in updates:
+        updates["applicable_fields_json"] = json.dumps(updates.pop("applicable_fields"), ensure_ascii=False)
+    with connection_scope() as connection, connection.cursor() as cursor:
+        if not _table_exists(cursor, "jurisdiction_data_source_registry"):
+            raise RuntimeError("jurisdiction_data_source_registry is not available")
+        if updates:
+            assignments = ", ".join(f"{key} = %s" for key in updates)
+            cursor.execute(
+                f"UPDATE jurisdiction_data_source_registry SET {assignments} WHERE source_id = %s",
+                tuple(updates.values()) + (source_id,),
+            )
+            if cursor.rowcount == 0:
+                raise KeyError(source_id)
+    for source in fetch_jurisdiction_data_sources():
+        if source["source_id"] == source_id:
+            return source
+    raise KeyError(source_id)
+
+
+def fetch_jurisdiction_region_tags(
+    jurisdiction_id: str | None = None,
+    tag_code: str | None = None,
+) -> list[dict[str, object]]:
+    with connection_scope() as connection, connection.cursor() as cursor:
+        if not _table_exists(cursor, "jurisdiction_region_tag_map"):
+            return []
+        where_parts = ["1 = 1"]
+        params: list[object] = []
+        if jurisdiction_id:
+            where_parts.append("m.jurisdiction_id = %s")
+            params.append(jurisdiction_id)
+        if tag_code:
+            where_parts.append("m.tag_code = %s")
+            params.append(tag_code)
+        cursor.execute(
+            f"""
+            SELECT m.*, j.internal_code AS jurisdiction_code,
+                   j.name_cn AS jurisdiction_name_cn, j.name_en AS jurisdiction_name_en
+            FROM jurisdiction_region_tag_map m
+            JOIN jurisdictions j ON j.jurisdiction_id = m.jurisdiction_id
+            WHERE {' AND '.join(where_parts)}
+            ORDER BY m.tag_scheme, m.tag_code, j.internal_code
+            """,
+            tuple(params),
+        )
+        return [_region_tag_row(row) for row in _normalize_text_records(cursor.fetchall())]
+
+
+def insert_jurisdiction_region_tag(values: dict[str, object], actor: str = "") -> dict[str, object]:
+    with connection_scope() as connection, connection.cursor() as cursor:
+        if not _table_exists(cursor, "jurisdiction_region_tag_map"):
+            raise RuntimeError("jurisdiction_region_tag_map is not available")
+        record = {
+            "id": f"jrtm-{uuid.uuid4().hex[:16]}",
+            **values,
+            "created_by": actor,
+            "updated_by": actor,
+        }
+        columns = [
+            "id",
+            "jurisdiction_id",
+            "tag_scheme",
+            "tag_code",
+            "tag_name_cn",
+            "tag_name_en",
+            "source_id",
+            "source_type",
+            "source_name",
+            "source_url",
+            "source_note",
+            "source_verified",
+            "source_verified_at",
+            "source_verified_by",
+            "last_reviewed_at",
+            "next_review_due_at",
+            "review_status",
+            "effective_from",
+            "effective_to",
+            "is_active",
+            "reason_note",
+            "created_by",
+            "updated_by",
+        ]
+        placeholders = ", ".join(f"%({column})s" for column in columns)
+        updates = ", ".join(f"{column} = VALUES({column})" for column in columns if column not in {"id", "created_by"})
+        cursor.execute(
+            f"""
+            INSERT INTO jurisdiction_region_tag_map ({', '.join(columns)})
+            VALUES ({placeholders})
+            ON DUPLICATE KEY UPDATE {updates}
+            """,
+            {column: record.get(column) for column in columns},
+        )
+    tags = fetch_jurisdiction_region_tags(
+        jurisdiction_id=str(values.get("jurisdiction_id") or ""),
+        tag_code=str(values.get("tag_code") or ""),
+    )
+    if tags:
+        return tags[0]
+    raise KeyError(str(values.get("jurisdiction_id") or ""))
+
+
 def update_country_config(country_code: str, values: dict[str, object]) -> dict[str, object]:
     allowed = {
         "name_cn",
@@ -633,6 +883,11 @@ def update_country_config(country_code: str, values: dict[str, object]) -> dict[
     with connection_scope() as connection, connection.cursor() as cursor:
         if _jurisdiction_compat_available(cursor):
             _update_country_jurisdiction(cursor, country_code, normalized_values)
+            _sync_reference_registry_link(
+                cursor,
+                str(normalized_values.get("standard_code") or country_code),
+                str(normalized_values.get("display_code") or country_code),
+            )
     rows = fetch_country_config()["countries"]
     for row in rows:
         if row["code"] == country_code:
@@ -678,6 +933,11 @@ def insert_country_config(record: dict[str, object]) -> dict[str, object]:
                 "is_enabled": record.get("is_enabled") if record.get("is_enabled") is not None else enabled,
             }
             _update_country_jurisdiction(cursor, country_code, jurisdiction_values)
+            _sync_reference_registry_link(
+                cursor,
+                str(jurisdiction_values.get("standard_code") or country_code),
+                str(jurisdiction_values.get("display_code") or country_code),
+            )
 
     rows = fetch_country_config()["countries"]
     for row in rows:
@@ -854,6 +1114,11 @@ def restore_country_config_from_reference(
                     f"UPDATE jurisdictions SET {assignments} WHERE jurisdiction_id = %s",
                     tuple(restore_updates.values()) + (jurisdiction_id,),
                 )
+            _sync_reference_registry_link(
+                cursor,
+                str(jurisdiction_values.get("standard_code") or country_code),
+                str(jurisdiction_values.get("display_code") or country_code),
+            )
 
     rows = fetch_country_config(include_deleted=True)["countries"]
     for row in rows:
@@ -2220,6 +2485,209 @@ def _not_selectable_reason_expr(cursor: DictCursor) -> str:
     """
 
 
+def _seed_reference_registry_if_empty(cursor: DictCursor) -> None:
+    if not _table_exists(cursor, "jurisdiction_reference_registry"):
+        return
+    columns = [
+        "reference_id",
+        "standard_code",
+        "display_code",
+        "name_cn",
+        "name_en",
+        "aliases_json",
+        "jurisdiction_type",
+        "reference_category",
+        "business_scope_json",
+        "visibility_scope",
+        "candidate_status",
+        "quote_selectable_default",
+        "not_selectable_reason",
+        "reserved_reason",
+        "geo_region",
+        "default_business_economic_regions_json",
+        "source_id",
+        "source_name",
+        "source_url",
+        "source_version",
+        "source_note",
+        "source_verified",
+        "review_status",
+        "is_active",
+        "default_currency_legacy",
+    ]
+    placeholders = ", ".join(f"%({column})s" for column in columns)
+    updates = ", ".join(
+        f"{column} = IF({column} = '' OR {column} IS NULL, VALUES({column}), {column})"
+        for column in columns
+        if column not in {"reference_id", "standard_code"}
+    )
+    for item in default_registry_items():
+        record = {
+            "reference_id": item.reference_id,
+            "standard_code": item.standard_code,
+            "display_code": item.display_code,
+            "name_cn": item.name_cn,
+            "name_en": item.name_en,
+            "aliases_json": json.dumps(list(item.aliases), ensure_ascii=False),
+            "jurisdiction_type": item.jurisdiction_type,
+            "reference_category": item.reference_category,
+            "business_scope_json": json.dumps(list(item.business_scope), ensure_ascii=False),
+            "visibility_scope": item.visibility_scope,
+            "candidate_status": item.candidate_status,
+            "quote_selectable_default": item.quote_selectable_default,
+            "not_selectable_reason": item.not_selectable_reason,
+            "reserved_reason": item.reserved_reason,
+            "geo_region": item.geo_region,
+            "default_business_economic_regions_json": json.dumps(list(item.default_business_economic_regions), ensure_ascii=False),
+            "source_id": item.source_id,
+            "source_name": item.source_name,
+            "source_url": item.source_url,
+            "source_version": item.source_version,
+            "source_note": item.source_note,
+            "source_verified": item.source_verified,
+            "review_status": item.review_status,
+            "is_active": item.is_active,
+            "default_currency_legacy": item.default_currency_legacy,
+        }
+        cursor.execute(
+            f"""
+            INSERT INTO jurisdiction_reference_registry ({', '.join(columns)})
+            VALUES ({placeholders})
+            ON DUPLICATE KEY UPDATE {updates}
+            """,
+            record,
+        )
+    standard_code_match = (
+        "OR UPPER(COALESCE(j.standard_code, '')) = UPPER(r.standard_code)"
+        if _column_exists(cursor, "jurisdictions", "standard_code")
+        else ""
+    )
+    cursor.execute(
+        f"""
+        UPDATE jurisdiction_reference_registry r
+        JOIN jurisdictions j ON UPPER(j.internal_code) = UPPER(r.standard_code)
+          OR UPPER(j.display_code) = UPPER(r.display_code)
+          {standard_code_match}
+        SET r.jurisdiction_id = j.jurisdiction_id,
+            r.candidate_status = CASE
+              WHEN r.candidate_status = 'candidate' THEN 'linked_formal_master'
+              ELSE r.candidate_status
+            END
+        WHERE r.jurisdiction_id IS NULL
+        """
+    )
+
+
+def _sync_reference_registry_link(cursor: DictCursor, standard_code: str, display_code: str) -> None:
+    if not _table_exists(cursor, "jurisdiction_reference_registry"):
+        return
+    codes = sorted({standard_code.upper(), display_code.upper()} - {""})
+    if not codes:
+        return
+    placeholders = ", ".join(["%s"] * len(codes))
+    standard_code_match = (
+        f"OR UPPER(COALESCE(j.standard_code, '')) IN ({placeholders})"
+        if _column_exists(cursor, "jurisdictions", "standard_code")
+        else ""
+    )
+    cursor.execute(
+        f"""
+        UPDATE jurisdiction_reference_registry r
+        JOIN jurisdictions j ON (
+          UPPER(j.internal_code) IN ({placeholders})
+          OR UPPER(j.display_code) IN ({placeholders})
+          {standard_code_match}
+        )
+        SET r.jurisdiction_id = j.jurisdiction_id,
+            r.candidate_status = CASE
+              WHEN r.candidate_status = 'candidate' THEN 'linked_formal_master'
+              ELSE r.candidate_status
+            END
+        WHERE r.is_active = 1
+          AND (
+            UPPER(r.standard_code) IN ({placeholders})
+            OR UPPER(r.display_code) IN ({placeholders})
+          )
+        """,
+        tuple(codes + codes + (codes if standard_code_match else []) + codes + codes),
+    )
+
+
+def _fallback_reference_registry(keyword: str, include_hidden: bool) -> list[dict[str, object]]:
+    normalized = keyword.strip().lower()
+    rows: list[dict[str, object]] = []
+    for item in default_registry_items():
+        if not item.is_active:
+            continue
+        if not include_hidden and item.visibility_scope == "reserved_hidden":
+            continue
+        values = [item.name_cn, item.name_en, item.standard_code, item.display_code, *item.aliases]
+        if normalized and not any(normalized in str(value).lower() for value in values):
+            continue
+        rows.append(_reference_registry_row({
+            "reference_id": item.reference_id,
+            "jurisdiction_id": None,
+            "standard_code": item.standard_code,
+            "display_code": item.display_code,
+            "name_cn": item.name_cn,
+            "name_en": item.name_en,
+            "aliases_json": json.dumps(list(item.aliases), ensure_ascii=False),
+            "jurisdiction_type": item.jurisdiction_type,
+            "reference_category": item.reference_category,
+            "business_scope_json": json.dumps(list(item.business_scope), ensure_ascii=False),
+            "visibility_scope": item.visibility_scope,
+            "candidate_status": item.candidate_status,
+            "quote_selectable_default": item.quote_selectable_default,
+            "not_selectable_reason": item.not_selectable_reason,
+            "reserved_reason": item.reserved_reason,
+            "geo_region": item.geo_region,
+            "default_business_economic_regions_json": json.dumps(list(item.default_business_economic_regions), ensure_ascii=False),
+            "source_id": item.source_id,
+            "source_name": item.source_name,
+            "source_url": item.source_url,
+            "source_version": item.source_version,
+            "source_note": item.source_note,
+            "source_verified": item.source_verified,
+            "source_verified_at": None,
+            "source_verified_by": None,
+            "last_reviewed_at": None,
+            "next_review_due_at": None,
+            "review_status": item.review_status,
+            "is_active": item.is_active,
+            "default_currency_legacy": item.default_currency_legacy,
+        }))
+    return rows[:500]
+
+
+def _reference_registry_row(row: dict[str, object]) -> dict[str, object]:
+    normalized = dict(row)
+    normalized["jurisdiction_id"] = normalized.get("jurisdiction_id") or normalized.get("matched_jurisdiction_id")
+    normalized["aliases"] = _loads_json_list(normalized.pop("aliases_json", None))
+    normalized["business_scope"] = _loads_json_list(normalized.pop("business_scope_json", None))
+    normalized["default_business_economic_regions"] = _loads_json_list(
+        normalized.pop("default_business_economic_regions_json", None)
+    )
+    normalized["quote_selectable_default"] = _truthy(normalized.get("quote_selectable_default"))
+    normalized["source_verified"] = _truthy(normalized.get("source_verified"))
+    normalized["is_active"] = _truthy(normalized.get("is_active"), default=True)
+    return normalized
+
+
+def _data_source_row(row: dict[str, object]) -> dict[str, object]:
+    normalized = dict(row)
+    normalized["applicable_fields"] = _loads_json_list(normalized.pop("applicable_fields_json", None))
+    normalized["source_verified"] = _truthy(normalized.get("source_verified"))
+    normalized["is_active"] = _truthy(normalized.get("is_active"), default=True)
+    return normalized
+
+
+def _region_tag_row(row: dict[str, object]) -> dict[str, object]:
+    normalized = dict(row)
+    normalized["source_verified"] = _truthy(normalized.get("source_verified"))
+    normalized["is_active"] = _truthy(normalized.get("is_active"), default=True)
+    return normalized
+
+
 def _apply_jurisdiction_country_defaults(country: dict[str, object]) -> None:
     code = str(country.get("code") or "")
     country["jurisdiction_id"] = country.get("jurisdiction_id") or None
@@ -2535,6 +3003,11 @@ def _jurisdiction_updates_from_country_values(
         "source_verified_by": "source_verified_by",
         "manual_override": "manual_override",
         "remarks": "remarks",
+        "quote_selectable": "quote_selectable",
+        "quote_business_lines_json": "quote_business_lines_json",
+        "quote_option_group": "quote_option_group",
+        "quote_display_name": "quote_display_name",
+        "not_selectable_reason": "not_selectable_reason",
     }
     updates = {
         target: _normalize_nullable_code_value(value)
@@ -2560,6 +3033,8 @@ def _normalize_nullable_code_value(value: object) -> object:
 
 
 def _default_jurisdiction_type(country_code: str, country_type: object) -> str:
+    if country_code.upper() in {"HK", "MO", "TW"} or str(country_type or "") in {"特殊地区", "地区"}:
+        return "special_region"
     if country_code == "EP" or str(country_type or "") == "区域局":
         return "regional_office"
     return "single_country"

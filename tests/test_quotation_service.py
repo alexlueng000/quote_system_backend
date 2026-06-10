@@ -2,6 +2,8 @@ from datetime import datetime, timezone
 from decimal import Decimal
 
 from app.schemas.quotation import (
+    CountryBulkFromReferenceRequest,
+    JurisdictionReferenceCandidate,
     QuotationCreate,
     QuotationDraftCreate,
     QuotationDraftUpdate,
@@ -9,7 +11,9 @@ from app.schemas.quotation import (
     QuotationGenerateRequest,
     QuotationStatusUpdate,
 )
+from app.services import quotation_service
 from app.services.quotation_service import (
+    create_countries_from_reference_bulk,
     create_quotation,
     create_quotation_draft,
     create_quotation_from_drafts,
@@ -123,6 +127,72 @@ def test_workbench_options_follow_country_path_and_entity_rules(monkeypatch) -> 
     assert options.entity_types == ["大实体", "小实体"]
     assert options.quote_currency == "USD"
     assert options.has_path_rules is True
+
+
+def test_bulk_reference_soft_deleted_match_uses_restore_and_returns_active(monkeypatch) -> None:
+    reference = JurisdictionReferenceCandidate(
+        reference_id="ref-hk",
+        standard_code="HK",
+        display_code="HK",
+        name_cn="中国香港",
+        name_en="Hong Kong, China",
+        aliases=["HK", "香港"],
+        jurisdiction_type="special_region",
+        reference_category="region",
+        business_scope=["patent", "design"],
+        visibility_scope="country_master_reference",
+        candidate_status="candidate",
+        quote_selectable_default=False,
+        default_business_economic_regions=["GREATER_CHINA"],
+        source_name="WIPO Lex Members reference objects",
+        source_url="https://www.wipo.int/wipolex/zh/members",
+        source_version="P0 reference object baseline",
+        source_note="test",
+    )
+    restored_records: list[dict[str, object]] = []
+
+    monkeypatch.setattr(
+        quotation_service,
+        "get_jurisdiction_reference_candidate",
+        lambda reference_id: reference if reference_id == "ref-hk" else None,
+    )
+    monkeypatch.setattr(
+        quotation_service.mysql,
+        "inspect_country_reference_status",
+        lambda standard_code, display_code: {"status": "soft_deleted_exists", "country_code": "HK"},
+    )
+
+    def restore(record: dict[str, object], existence: dict[str, object]) -> dict[str, object]:
+        restored_records.append(record)
+        return {
+            "code": "HK",
+            "name_cn": "中国香港",
+            "name_en": "Hong Kong, China",
+            "default_currency": "HKD",
+            "country_type": "特殊地区",
+            "enabled": True,
+            "jurisdiction_id": "jur-HK",
+            "internal_code": "HK",
+            "display_code": "HK",
+            "jurisdiction_type": "special_region",
+            "is_enabled": True,
+            "business_region": ["GREATER_CHINA"],
+            "is_deleted": False,
+        }
+
+    monkeypatch.setattr(quotation_service.mysql, "restore_country_config_from_reference", restore)
+
+    result = create_countries_from_reference_bulk(
+        CountryBulkFromReferenceRequest(reference_ids=["ref-hk"], source_verified=True),
+        {"email": "admin@example.com"},
+    )
+
+    assert result.restored_count == 1
+    assert result.created_count == 0
+    assert restored_records[0]["enabled"] is True
+    assert restored_records[0]["is_enabled"] is True
+    assert result.restored_items[0].country is not None
+    assert result.restored_items[0].country.is_deleted is False
 
 
 def test_quote_jurisdiction_preview_filters_and_groups(monkeypatch) -> None:
