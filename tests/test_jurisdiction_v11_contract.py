@@ -3,9 +3,11 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
-BACKEND_ROOT = REPO_ROOT / "quote_system_backend"
-DOCS_ROOT = REPO_ROOT / "docs"
+WORKSPACE_ROOT = Path(__file__).resolve().parents[2]
+BACKEND_ROOT = Path(__file__).resolve().parents[1]
+FRONTEND_ROOT = WORKSPACE_ROOT / "frontend"
+MIGRATIONS_ROOT = BACKEND_ROOT / "migrations"
+DOCS_ROOT = WORKSPACE_ROOT / "docs"
 
 
 def _read(path: Path) -> str:
@@ -40,7 +42,7 @@ def test_v11_contract_documents_cover_required_p0_items() -> None:
 
 
 def test_acceptance_check_sql_is_read_only_select_only() -> None:
-    sql = _read(BACKEND_ROOT / "jurisdiction_v11_acceptance_check.sql")
+    sql = _read(MIGRATIONS_ROOT / "jurisdiction_v11_acceptance_check.sql")
 
     forbidden_keywords = ["CREATE", "ALTER", "UPDATE", "DELETE", "INSERT", "DROP", "TRUNCATE"]
     for keyword in forbidden_keywords:
@@ -52,7 +54,7 @@ def test_acceptance_check_sql_is_read_only_select_only() -> None:
 
 
 def test_acceptance_check_sql_covers_stable_ids_and_legacy_mapping() -> None:
-    sql = _read(BACKEND_ROOT / "jurisdiction_v11_acceptance_check.sql")
+    sql = _read(MIGRATIONS_ROOT / "jurisdiction_v11_acceptance_check.sql")
 
     for code in ("US", "JP", "KR", "EP"):
         assert f"'{code}'" in sql
@@ -62,7 +64,7 @@ def test_acceptance_check_sql_covers_stable_ids_and_legacy_mapping() -> None:
 
 
 def test_acceptance_check_sql_does_not_force_legacy_mapping_for_non_country_objects() -> None:
-    sql = _read(BACKEND_ROOT / "jurisdiction_v11_acceptance_check.sql")
+    sql = _read(MIGRATIONS_ROOT / "jurisdiction_v11_acceptance_check.sql")
 
     for code in ("WO", "PCT", "HAGUE", "MADRID", "WIPO"):
         assert f"'{code}'" in sql
@@ -70,8 +72,8 @@ def test_acceptance_check_sql_does_not_force_legacy_mapping_for_non_country_obje
 
 
 def test_forbidden_regional_system_codes_are_not_entry_routes_in_seed_sql() -> None:
-    quote_engine_seed = _read(BACKEND_ROOT / "phase_1_quote_engine_config.sql")
-    acceptance_sql = _read(BACKEND_ROOT / "jurisdiction_v11_acceptance_check.sql")
+    quote_engine_seed = _read(MIGRATIONS_ROOT / "phase_1_quote_engine_config.sql")
+    acceptance_sql = _read(MIGRATIONS_ROOT / "jurisdiction_v11_acceptance_check.sql")
 
     forbidden_route_codes = ("EPC", "EPO", "EUIPO", "UPC_UP", "UPC", "UP")
     for code in forbidden_route_codes:
@@ -82,7 +84,7 @@ def test_forbidden_regional_system_codes_are_not_entry_routes_in_seed_sql() -> N
 
 
 def test_v11_acceptance_sql_checks_disabled_or_deleted_advisor_current_relations() -> None:
-    sql = _read(BACKEND_ROOT / "jurisdiction_v11_acceptance_check.sql")
+    sql = _read(MIGRATIONS_ROOT / "jurisdiction_v11_acceptance_check.sql")
 
     assert "advisor_current_relation_with_disabled_or_deleted_jurisdiction" in sql
     assert "r.publish_status = 'published'" in sql
@@ -103,7 +105,7 @@ def test_ip_system_current_reader_filters_disabled_or_deleted_jurisdictions() ->
 
 
 def test_reference_registry_migration_is_candidate_pool_not_second_master() -> None:
-    sql = _read(BACKEND_ROOT / "phase_9_jurisdiction_v11b_reference_registry.sql")
+    sql = _read(MIGRATIONS_ROOT / "phase_9_jurisdiction_v11b_reference_registry.sql")
 
     assert "CREATE TABLE IF NOT EXISTS jurisdiction_reference_registry" in sql
     assert "jurisdiction_id VARCHAR(64) NULL" in sql
@@ -118,7 +120,7 @@ def test_reference_registry_migration_is_candidate_pool_not_second_master() -> N
 
 
 def test_belt_and_road_tag_source_is_pending_review_without_bulk_mapping() -> None:
-    sql = _read(BACKEND_ROOT / "phase_9_jurisdiction_v11b_reference_registry.sql")
+    sql = _read(MIGRATIONS_ROOT / "phase_9_jurisdiction_v11b_reference_registry.sql")
 
     assert "BELT_AND_ROAD_SOURCE" in sql
     assert "一带一路仅作为商务/市场标签机制预留" in sql
@@ -147,8 +149,8 @@ def test_reference_registry_defaults_keep_regions_and_reserved_boundaries() -> N
 
 
 def test_frontend_reference_entry_uses_api_and_default_visible_candidates() -> None:
-    frontend_page = _read(REPO_ROOT / "quote_system_frontend" / "app" / "page.tsx")
-    admin = _read(REPO_ROOT / "quote_system_frontend" / "app" / "components" / "admin.tsx")
+    frontend_page = _read(FRONTEND_ROOT / "app" / "page.tsx")
+    admin = _read(FRONTEND_ROOT / "app" / "components" / "admin.tsx")
 
     assert "/jurisdiction-references" in frontend_page
     assert "include_hidden=true" not in frontend_page
@@ -157,8 +159,8 @@ def test_frontend_reference_entry_uses_api_and_default_visible_candidates() -> N
 
 
 def test_source_management_frontend_exposes_required_edit_fields() -> None:
-    admin = _read(REPO_ROOT / "quote_system_frontend" / "app" / "components" / "admin.tsx")
-    page = _read(REPO_ROOT / "quote_system_frontend" / "app" / "page.tsx")
+    admin = _read(FRONTEND_ROOT / "app" / "components" / "admin.tsx")
+    page = _read(FRONTEND_ROOT / "app" / "page.tsx")
 
     for term in (
         "source_name",
@@ -176,7 +178,7 @@ def test_source_management_frontend_exposes_required_edit_fields() -> None:
 
 def test_reference_create_restore_logic_does_not_treat_unquoted_as_deleted() -> None:
     service = _read(BACKEND_ROOT / "app" / "services" / "quotation_service.py")
-    admin = _read(REPO_ROOT / "quote_system_frontend" / "app" / "components" / "admin.tsx")
+    admin = _read(FRONTEND_ROOT / "app" / "components" / "admin.tsx")
 
     assert "enabled = bool(payload.enabled)" in service
     assert 'enabled=True,\n                    business_region=list(reference.default_business_economic_regions)' in service
