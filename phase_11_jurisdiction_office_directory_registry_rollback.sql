@@ -1,0 +1,1 @@
+DROP TABLE IF EXISTS jurisdiction_office_directory_registry;

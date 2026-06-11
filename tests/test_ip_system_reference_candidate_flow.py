@@ -45,7 +45,7 @@ def test_ip_system_candidate_api_routes_are_registered() -> None:
 
 
 def test_reference_candidate_review_publish_flow_and_formal_read_boundaries(p0test_sources: None) -> None:
-    previous_enabled = _set_jurisdiction_enabled("jur-CN", True)
+    previous_visibility = _set_jurisdiction_current_for_test("jur-CN")
     try:
         created = ip_system_service.create_reference_candidates(
             "ip-system-pct",
@@ -99,7 +99,7 @@ def test_reference_candidate_review_publish_flow_and_formal_read_boundaries(p0te
         formal_sources = _formal_relation_sources("jur-CN", "p0test://pct")
         assert formal_sources == ["p0test://pct"]
     finally:
-        _set_jurisdiction_enabled("jur-CN", previous_enabled)
+        _restore_jurisdiction_visibility("jur-CN", previous_visibility)
 
 
 def test_manual_reference_candidate_enters_review_without_direct_publish(p0test_sources: None) -> None:
@@ -421,6 +421,29 @@ def _set_jurisdiction_enabled(jurisdiction_id: str, enabled: bool) -> bool:
             (1 if enabled else 0, jurisdiction_id),
         )
     return previous
+
+
+def _set_jurisdiction_current_for_test(jurisdiction_id: str) -> tuple[bool, bool]:
+    with mysql.connection_scope() as connection, connection.cursor() as cursor:
+        cursor.execute(
+            "SELECT is_enabled, is_deleted FROM jurisdictions WHERE jurisdiction_id = %s LIMIT 1",
+            (jurisdiction_id,),
+        )
+        row = cursor.fetchone() or {"is_enabled": 0, "is_deleted": 0}
+        previous = (bool(row["is_enabled"]), bool(row.get("is_deleted") or False))
+        cursor.execute(
+            "UPDATE jurisdictions SET is_enabled = 1, is_deleted = 0 WHERE jurisdiction_id = %s",
+            (jurisdiction_id,),
+        )
+    return previous
+
+
+def _restore_jurisdiction_visibility(jurisdiction_id: str, previous: tuple[bool, bool]) -> None:
+    with mysql.connection_scope() as connection, connection.cursor() as cursor:
+        cursor.execute(
+            "UPDATE jurisdictions SET is_enabled = %s, is_deleted = %s WHERE jurisdiction_id = %s",
+            (1 if previous[0] else 0, 1 if previous[1] else 0, jurisdiction_id),
+        )
 
 
 def _system_domain_enabled_values(system_codes: tuple[str, ...]) -> dict[str, int]:

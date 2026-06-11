@@ -280,7 +280,7 @@ def test_enablement_check_returns_published_for_published_current_relation(v1a_r
 
 
 def test_enablement_check_system_statuses_distinguish_candidate_review_and_publish(v1a_records: None) -> None:
-    previous_cn_enabled = _set_jurisdiction_enabled("jur-CN", True)
+    previous_cn_visibility = _set_jurisdiction_current_for_test("jur-CN")
     try:
         created = ip_system_service.create_reference_candidates(
             "ip-system-pct",
@@ -335,7 +335,7 @@ def test_enablement_check_system_statuses_distinguish_candidate_review_and_publi
         assert published_statuses["PCT"].status == "published"
         assert _formal_relation_sources("jur-CN", "v1atest://pct") == ["v1atest://pct"]
     finally:
-        _set_jurisdiction_enabled("jur-CN", previous_cn_enabled)
+        _restore_jurisdiction_visibility("jur-CN", previous_cn_visibility)
 
 
 def test_v1a_regional_semantics_are_not_contracting_state_and_euipo_stays_out_of_patent_ePC_mix() -> None:
@@ -434,6 +434,29 @@ def _set_jurisdiction_enabled(jurisdiction_id: str, enabled: bool) -> bool:
             (1 if enabled else 0, jurisdiction_id),
         )
     return previous
+
+
+def _set_jurisdiction_current_for_test(jurisdiction_id: str) -> tuple[bool, bool]:
+    with mysql.connection_scope() as connection, connection.cursor() as cursor:
+        cursor.execute(
+            "SELECT is_enabled, is_deleted FROM jurisdictions WHERE jurisdiction_id = %s LIMIT 1",
+            (jurisdiction_id,),
+        )
+        row = cursor.fetchone() or {"is_enabled": 0, "is_deleted": 0}
+        previous = (bool(row["is_enabled"]), bool(row.get("is_deleted") or False))
+        cursor.execute(
+            "UPDATE jurisdictions SET is_enabled = 1, is_deleted = 0 WHERE jurisdiction_id = %s",
+            (jurisdiction_id,),
+        )
+    return previous
+
+
+def _restore_jurisdiction_visibility(jurisdiction_id: str, previous: tuple[bool, bool]) -> None:
+    with mysql.connection_scope() as connection, connection.cursor() as cursor:
+        cursor.execute(
+            "UPDATE jurisdictions SET is_enabled = %s, is_deleted = %s WHERE jurisdiction_id = %s",
+            (1 if previous[0] else 0, 1 if previous[1] else 0, jurisdiction_id),
+        )
 
 
 def _cleanup_v1a_records() -> None:

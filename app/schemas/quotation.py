@@ -51,7 +51,6 @@ BUSINESS_REGION_TAGS = {
     "EUROPE",
     "NORTH_AMERICA",
     "LATIN_AMERICA",
-    "SOUTH_AMERICA",
     "SOUTHEAST_ASIA",
     "NORTHEAST_ASIA_JP_KR",
     "GREATER_CHINA",
@@ -75,7 +74,8 @@ LEGACY_BUSINESS_REGION_ALIASES = {
     "Europe": "EUROPE",
     "North America": "NORTH_AMERICA",
     "Latin America": "LATIN_AMERICA",
-    "South America": "SOUTH_AMERICA",
+    "SOUTH_AMERICA": "LATIN_AMERICA",
+    "South America": "LATIN_AMERICA",
     "Southeast Asia": "SOUTHEAST_ASIA",
     "Middle East": "MIDDLE_EAST",
     "Africa": "AFRICA",
@@ -87,7 +87,7 @@ LEGACY_BUSINESS_REGION_ALIASES = {
 
 def _normalize_business_tags(value: object) -> list[str]:
     if value in (None, ""):
-        return ["OTHER"]
+        return []
     raw_items: list[object]
     if isinstance(value, str):
         try:
@@ -111,7 +111,9 @@ def _normalize_business_tags(value: object) -> list[str]:
             raise ValueError("invalid business_region")
         if normalized not in tags:
             tags.append(normalized)
-    return tags or ["OTHER"]
+    if len(tags) > 1 and "OTHER" in tags:
+        tags = [tag for tag in tags if tag != "OTHER"]
+    return tags
 
 
 class User(BaseModel):
@@ -245,7 +247,7 @@ class Country(BaseModel):
     enabled: bool
     display_order: int = 0
     international_region: str = ""
-    business_region: list[str] = Field(default_factory=lambda: ["OTHER"])
+    business_region: list[str] = Field(default_factory=list)
     region_remark: str = ""
     jurisdiction_id: str | None = None
     internal_code: str = ""
@@ -266,12 +268,19 @@ class Country(BaseModel):
     source_verified: bool = False
     source_verified_at: datetime | None = None
     source_verified_by: str | None = None
+    review_status: Literal["pending_review", "verified", "needs_update", "deprecated"] = "pending_review"
     manual_override: bool = False
     remarks: str | None = None
     is_deleted: bool = False
     deleted_at: datetime | None = None
     deleted_by: str | None = None
     delete_reason: str | None = None
+    default_office_jurisdiction_id: str | None = None
+    default_office_code: str = ""
+    default_office_name_cn: str = ""
+    default_office_name_en: str = ""
+    default_office_type: str = ""
+    default_office_source_note: str = ""
 
     @field_validator("business_region", mode="before")
     @classmethod
@@ -301,9 +310,19 @@ class CountryUpdate(BaseModel):
     source_name: str | None = None
     source_url: str | None = None
     source_version: str | None = None
+    source_note: str | None = None
     last_verified_at: datetime | None = None
+    source_verified: bool | None = None
+    source_verified_at: datetime | None = None
+    source_verified_by: str | None = None
     manual_override: bool | None = None
     remarks: str | None = None
+    default_office_jurisdiction_id: str | None = None
+    default_office_code: str | None = None
+    default_office_name_cn: str | None = None
+    default_office_name_en: str | None = None
+    default_office_type: str | None = None
+    default_office_source_note: str | None = None
 
     @field_validator("jurisdiction_type")
     @classmethod
@@ -341,7 +360,7 @@ class CountryCreate(BaseModel):
     enabled: bool = True
     display_order: int = Field(default=0, ge=0)
     international_region: str = ""
-    business_region: list[str] | str = Field(default_factory=lambda: ["OTHER"])
+    business_region: list[str] | str = Field(default_factory=list)
     region_remark: str = ""
     internal_code: str = ""
     display_code: str = ""
@@ -356,19 +375,20 @@ class CountryCreate(BaseModel):
     last_verified_at: datetime | None = None
     source_verified_at: datetime | None = None
     source_verified_by: str | None = None
+    review_status: Literal["pending_review", "verified", "needs_update", "deprecated"] = "pending_review"
     manual_override: bool = False
     remarks: str | None = None
+    default_office_jurisdiction_id: str | None = None
+    default_office_code: str = ""
+    default_office_name_cn: str = ""
+    default_office_name_en: str = ""
+    default_office_type: str = ""
+    default_office_source_note: str = ""
 
     @field_validator("business_region", mode="before")
     @classmethod
     def validate_create_business_region(cls, value: object) -> list[str]:
         return _normalize_business_tags(value)
-
-    @model_validator(mode="after")
-    def validate_source_verified(self) -> "CountryCreate":
-        if not self.source_verified:
-            raise ValueError("source verification is required")
-        return self
 
 
 class CountryDeleteRequest(BaseModel):
@@ -377,16 +397,51 @@ class CountryDeleteRequest(BaseModel):
 
 class CountryBulkFromReferenceRequest(BaseModel):
     reference_ids: list[str] = Field(min_length=1)
+    staging_items: list["CountryBulkFromReferenceStagingItem"] = Field(default_factory=list)
     source_verified: bool = False
     source_verified_by: str | None = None
     source_verified_at: datetime | None = None
     batch_note: str = ""
 
-    @model_validator(mode="after")
-    def validate_source_verified(self) -> "CountryBulkFromReferenceRequest":
-        if not self.source_verified:
-            raise ValueError("source verification is required")
-        return self
+
+class CountryBulkFromReferenceStagingItem(BaseModel):
+    reference_id: str = Field(min_length=1)
+    name_cn: str = ""
+    name_en: str = ""
+    display_code: str = ""
+    jurisdiction_type: str = ""
+    international_region: str = ""
+    business_region: list[str] | str = Field(default_factory=list)
+    default_office_name_cn: str = ""
+    default_office_name_en: str = ""
+    default_office_code: str = ""
+    default_office_type: str = ""
+    remarks: str = ""
+    overwrite_existing_fields: bool = False
+    review_status: Literal["pending_review", "verified", "needs_update", "deprecated"] = "pending_review"
+
+    @field_validator("international_region")
+    @classmethod
+    def validate_staging_geo_region(cls, value: str) -> str:
+        if value in ("", None):
+            return ""
+        if value not in GEO_REGIONS:
+            raise ValueError("invalid international_region")
+        return value
+
+    @field_validator("jurisdiction_type")
+    @classmethod
+    def validate_staging_jurisdiction_type(cls, value: str) -> str:
+        if value in ("", None):
+            return ""
+        if value not in JURISDICTION_TYPES:
+            raise ValueError("invalid jurisdiction_type")
+        return value
+
+    @field_validator("business_region", mode="before")
+    @classmethod
+    def validate_staging_business_region(cls, value: object) -> list[str]:
+        return _normalize_business_tags(value)
 
 
 class CountryBulkFromReferenceResult(BaseModel):
@@ -434,7 +489,7 @@ class JurisdictionReferenceCandidate(BaseModel):
     not_selectable_reason: str = "未纳入当前报价范围"
     reserved_reason: str = ""
     geo_region: str = "Other"
-    default_business_economic_regions: list[str] = Field(default_factory=lambda: ["OTHER"])
+    default_business_economic_regions: list[str] = Field(default_factory=list)
     source_id: str | None = None
     source_name: str = ""
     source_url: str = ""
@@ -448,6 +503,11 @@ class JurisdictionReferenceCandidate(BaseModel):
     review_status: str = "pending_review"
     is_active: bool = True
     default_currency_legacy: str = "USD"
+    default_office_code: str = ""
+    default_office_name_cn: str = ""
+    default_office_name_en: str = ""
+    default_office_type: str = ""
+    default_office_source_note: str = ""
 
     @field_validator("default_business_economic_regions", mode="before")
     @classmethod

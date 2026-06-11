@@ -3,6 +3,8 @@ from decimal import Decimal
 
 from app.schemas.quotation import (
     CountryBulkFromReferenceRequest,
+    CountryBulkFromReferenceStagingItem,
+    CountryCreate,
     JurisdictionReferenceCandidate,
     QuotationCreate,
     QuotationDraftCreate,
@@ -148,6 +150,10 @@ def test_bulk_reference_soft_deleted_match_uses_restore_and_returns_active(monke
         source_url="https://www.wipo.int/wipolex/zh/members",
         source_version="P0 reference object baseline",
         source_note="test",
+        default_office_name_cn="香港知识产权署",
+        default_office_name_en="Intellectual Property Department",
+        default_office_type="national_ip_office",
+        default_office_source_note="WIPO_IP_OFFICES_DIRECTORY",
     )
     restored_records: list[dict[str, object]] = []
 
@@ -170,12 +176,12 @@ def test_bulk_reference_soft_deleted_match_uses_restore_and_returns_active(monke
             "name_en": "Hong Kong, China",
             "default_currency": "HKD",
             "country_type": "特殊地区",
-            "enabled": True,
+            "enabled": record["enabled"],
             "jurisdiction_id": "jur-HK",
             "internal_code": "HK",
             "display_code": "HK",
             "jurisdiction_type": "special_region",
-            "is_enabled": True,
+            "is_enabled": record["is_enabled"],
             "business_region": ["GREATER_CHINA"],
             "is_deleted": False,
         }
@@ -189,10 +195,598 @@ def test_bulk_reference_soft_deleted_match_uses_restore_and_returns_active(monke
 
     assert result.restored_count == 1
     assert result.created_count == 0
-    assert restored_records[0]["enabled"] is True
-    assert restored_records[0]["is_enabled"] is True
+    assert restored_records[0]["enabled"] is False
+    assert restored_records[0]["is_enabled"] is False
+    assert restored_records[0]["remarks"] == ""
+    assert restored_records[0]["international_region"] == "Asia"
+    assert restored_records[0]["source_name"].startswith("字段级来源")
+    assert "WIPO Lex / treaty reference baseline 只作为候选池补充来源" in restored_records[0]["source_note"]
     assert result.restored_items[0].country is not None
     assert result.restored_items[0].country.is_deleted is False
+
+
+def test_bulk_reference_staging_payload_overrides_defaults(monkeypatch) -> None:
+    reference = JurisdictionReferenceCandidate(
+        reference_id="ref-nl",
+        standard_code="NL",
+        display_code="NL",
+        name_cn="荷兰",
+        name_en="Netherlands",
+        aliases=["NL", "Netherlands"],
+        jurisdiction_type="single_country",
+        reference_category="country",
+        business_scope=["patent", "design"],
+        visibility_scope="country_master_reference",
+        candidate_status="candidate",
+        quote_selectable_default=False,
+        default_business_economic_regions=[],
+        source_name="WIPO ST.3",
+        source_url="https://example.test",
+        source_version="current",
+        source_note="",
+        default_office_name_cn="荷兰专利局",
+        default_office_name_en="Netherlands Patent Office",
+        default_office_type="national_ip_office",
+        default_office_source_note="WIPO_IP_OFFICES_DIRECTORY",
+    )
+    created_payloads: list[object] = []
+
+    monkeypatch.setattr(quotation_service, "get_jurisdiction_reference_candidate", lambda reference_id: reference)
+    monkeypatch.setattr(
+        quotation_service.mysql,
+        "inspect_country_reference_status",
+        lambda standard_code, display_code: {"status": "not_exists"},
+    )
+
+    def create_country(payload, current_user):
+        created_payloads.append(payload)
+        return quotation_service.Country.model_validate({
+            "code": "NL",
+            "name_cn": payload.name_cn,
+            "name_en": payload.name_en,
+            "default_currency": "USD",
+            "country_type": "单一国家",
+            "enabled": payload.enabled,
+            "business_region": payload.business_region,
+            "international_region": payload.international_region,
+            "display_code": payload.display_code,
+            "jurisdiction_type": "single_country",
+            "is_enabled": payload.is_enabled,
+            "remarks": payload.remarks,
+            "default_office_code": payload.default_office_code,
+            "default_office_name_en": payload.default_office_name_en,
+            "default_office_type": payload.default_office_type,
+        })
+
+    monkeypatch.setattr(quotation_service, "create_country_config", create_country)
+
+    result = create_countries_from_reference_bulk(
+        CountryBulkFromReferenceRequest(
+            reference_ids=["ref-nl"],
+            staging_items=[
+                CountryBulkFromReferenceStagingItem(
+                    reference_id="ref-nl",
+                    name_cn="荷兰王国",
+                    name_en="Kingdom of the Netherlands",
+                    display_code="NL-PAT",
+                    international_region="Europe",
+                    business_region=["EUROPE"],
+                    default_office_name_cn="荷兰专利局",
+                    default_office_name_en="Netherlands Patent Office",
+                    default_office_code="",
+                    default_office_type="national_ip_office",
+                    remarks="人工确认",
+                )
+            ],
+            source_verified=True,
+        ),
+        {"email": "admin@example.com"},
+    )
+
+    assert result.created_count == 1
+    assert created_payloads[0].name_cn == "荷兰王国"
+    assert created_payloads[0].display_code == "NL-PAT"
+    assert created_payloads[0].business_region == ["EUROPE"]
+    assert created_payloads[0].default_office_name_en == "Netherlands Patent Office"
+    assert created_payloads[0].default_office_code == ""
+    assert created_payloads[0].remarks == "人工确认"
+
+
+def test_bulk_reference_nl_defaults_keep_office_code_empty_and_remarks_empty(monkeypatch) -> None:
+    reference = JurisdictionReferenceCandidate(
+        reference_id="ref-nl",
+        standard_code="NL",
+        display_code="NL",
+        name_cn="荷兰",
+        name_en="Netherlands",
+        aliases=["NL", "Netherlands"],
+        jurisdiction_type="single_country",
+        reference_category="country",
+        business_scope=["patent", "design"],
+        visibility_scope="country_master_reference",
+        candidate_status="candidate",
+        quote_selectable_default=False,
+        default_business_economic_regions=["EUROPE"],
+        source_name="WIPO ST.3",
+        source_url="https://example.test",
+        source_version="current",
+        source_note="",
+    )
+    created_payloads: list[object] = []
+
+    monkeypatch.setattr(quotation_service, "get_jurisdiction_reference_candidate", lambda reference_id: reference)
+    monkeypatch.setattr(
+        quotation_service.mysql,
+        "inspect_country_reference_status",
+        lambda standard_code, display_code: {"status": "not_exists"},
+    )
+
+    def create_country(payload, current_user):
+        created_payloads.append(payload)
+        return quotation_service.Country.model_validate({
+            "code": "NL",
+            "name_cn": payload.name_cn,
+            "name_en": payload.name_en,
+            "default_currency": "USD",
+            "country_type": "单一国家",
+            "enabled": payload.enabled,
+            "business_region": payload.business_region,
+            "international_region": payload.international_region,
+            "display_code": payload.display_code,
+            "jurisdiction_type": "single_country",
+            "is_enabled": payload.is_enabled,
+            "remarks": payload.remarks,
+            "default_office_code": payload.default_office_code,
+            "default_office_name_en": payload.default_office_name_en,
+            "default_office_type": payload.default_office_type,
+            "default_office_source_note": payload.default_office_source_note,
+        })
+
+    monkeypatch.setattr(quotation_service, "create_country_config", create_country)
+
+    result = create_countries_from_reference_bulk(
+        CountryBulkFromReferenceRequest(reference_ids=["ref-nl"], source_verified=True),
+        {"email": "admin@example.com"},
+    )
+
+    assert result.created_count == 1
+    assert created_payloads[0].default_office_name_en == "Netherlands Patent Office"
+    assert created_payloads[0].default_office_type == "national_ip_office"
+    assert created_payloads[0].default_office_code == ""
+    assert created_payloads[0].default_office_source_note.startswith("WIPO_IP_OFFICES_DIRECTORY")
+    assert created_payloads[0].remarks == ""
+
+
+def test_bulk_reference_staging_rejects_incomplete_office(monkeypatch) -> None:
+    reference = JurisdictionReferenceCandidate(
+        reference_id="ref-zz",
+        standard_code="ZZ",
+        display_code="ZZ",
+        name_cn="测试国",
+        name_en="Testland",
+        aliases=["ZZ"],
+        jurisdiction_type="single_country",
+        reference_category="country",
+        business_scope=["patent"],
+        visibility_scope="country_master_reference",
+        candidate_status="candidate",
+        quote_selectable_default=False,
+        default_business_economic_regions=[],
+        source_name="WIPO ST.3",
+        source_url="https://example.test",
+        source_version="current",
+        source_note="",
+    )
+    monkeypatch.setattr(quotation_service, "get_jurisdiction_reference_candidate", lambda reference_id: reference)
+
+    result = create_countries_from_reference_bulk(
+        CountryBulkFromReferenceRequest(
+            reference_ids=["ref-zz"],
+            staging_items=[
+                CountryBulkFromReferenceStagingItem(
+                    reference_id="ref-zz",
+                    name_cn="测试国",
+                    name_en="Testland",
+                    display_code="ZZ",
+                    international_region="Europe",
+                    business_region=["EUROPE"],
+                    default_office_name_en="",
+                    default_office_type="",
+                )
+            ],
+            source_verified=True,
+        ),
+        {"email": "admin@example.com"},
+    )
+
+    assert result.failed_count == 1
+    assert "Testland：主管局名称不能为空" in result.failed_items[0].reason
+
+
+def test_bulk_reference_staging_rejects_other_or_empty_business_fields(monkeypatch) -> None:
+    reference = JurisdictionReferenceCandidate(
+        reference_id="ref-zz",
+        standard_code="ZZ",
+        display_code="ZZ",
+        name_cn="测试国",
+        name_en="Testland",
+        aliases=["ZZ"],
+        jurisdiction_type="single_country",
+        reference_category="country",
+        business_scope=["patent"],
+        visibility_scope="country_master_reference",
+        candidate_status="candidate",
+        quote_selectable_default=False,
+        default_business_economic_regions=[],
+        source_name="WIPO ST.3",
+        source_url="https://example.test",
+        source_version="current",
+        source_note="",
+        default_office_name_en="Testland IP Office",
+        default_office_type="national_ip_office",
+        default_office_source_note="WIPO_IP_OFFICES_DIRECTORY",
+    )
+    monkeypatch.setattr(quotation_service, "get_jurisdiction_reference_candidate", lambda reference_id: reference)
+
+    result = create_countries_from_reference_bulk(
+        CountryBulkFromReferenceRequest(
+            reference_ids=["ref-zz"],
+            staging_items=[
+                CountryBulkFromReferenceStagingItem(
+                    reference_id="ref-zz",
+                    name_cn="测试国",
+                    name_en="Testland",
+                    display_code="ZZ",
+                    international_region="",
+                    business_region=[],
+                    default_office_name_en="Testland IP Office",
+                    default_office_type="national_ip_office",
+                )
+            ],
+            source_verified=True,
+        ),
+        {"email": "admin@example.com"},
+    )
+
+    assert result.failed_count == 1
+    assert "Testland：地理区域未配置" in result.failed_items[0].reason
+
+    result = create_countries_from_reference_bulk(
+        CountryBulkFromReferenceRequest(
+            reference_ids=["ref-zz"],
+            staging_items=[
+                CountryBulkFromReferenceStagingItem(
+                    reference_id="ref-zz",
+                    name_cn="测试国",
+                    name_en="Testland",
+                    display_code="ZZ",
+                    international_region="Europe",
+                    business_region=[],
+                    default_office_name_en="Testland IP Office",
+                    default_office_type="national_ip_office",
+                )
+            ],
+            source_verified=True,
+        ),
+        {"email": "admin@example.com"},
+    )
+
+    assert result.failed_count == 1
+    assert "Testland：商务/市场标签不能为空" in result.failed_items[0].reason
+
+
+def test_bulk_reference_staging_defaults_allow_nl_creation(monkeypatch) -> None:
+    from app.reference.jurisdiction_registry import default_registry_items
+    from app.schemas.quotation import Country
+
+    nl_reference = next(item for item in default_registry_items() if item.standard_code == "NL")
+    captured_payloads: list[object] = []
+
+    monkeypatch.setattr(quotation_service, "get_jurisdiction_reference_candidate", lambda reference_id: nl_reference)
+    monkeypatch.setattr(
+        quotation_service.mysql,
+        "inspect_country_reference_status",
+        lambda standard_code, display_code: {"status": "not_exists", "country_code": standard_code},
+    )
+
+    def create_country(payload, current_user):
+        captured_payloads.append(payload)
+        return Country.model_validate({
+            "code": payload.code,
+            "name_cn": payload.name_cn,
+            "name_en": payload.name_en,
+            "default_currency": "USD",
+            "enabled": payload.enabled,
+            "display_order": 0,
+            "international_region": payload.international_region,
+            "business_region": payload.business_region,
+            "jurisdiction_id": "jur-NL",
+            "internal_code": payload.internal_code,
+            "display_code": payload.display_code,
+            "jurisdiction_type": "single_country",
+            "standard_code": payload.standard_code,
+            "is_enabled": payload.is_enabled,
+            "source_name": "",
+            "source_url": "",
+            "source_version": "",
+            "source_note": "",
+            "source_verified": True,
+            "manual_override": payload.manual_override,
+            "remarks": payload.remarks,
+            "default_office_code": payload.default_office_code,
+            "default_office_name_cn": payload.default_office_name_cn,
+            "default_office_name_en": payload.default_office_name_en,
+            "default_office_type": payload.default_office_type,
+            "default_office_source_note": payload.default_office_source_note,
+        })
+
+    monkeypatch.setattr(quotation_service, "create_country_config", create_country)
+
+    result = create_countries_from_reference_bulk(
+        CountryBulkFromReferenceRequest(reference_ids=["ref-nl"], source_verified=True),
+        {"email": "admin@example.com"},
+    )
+
+    assert result.created_count == 1
+    assert result.failed_count == 0
+    assert captured_payloads
+    payload = captured_payloads[0]
+    assert payload.standard_code == "NL"
+    assert payload.display_code == "NL"
+    assert payload.international_region == "Europe"
+    assert payload.business_region == ["EUROPE", "EU"]
+    assert payload.default_office_name_en == "Netherlands Patent Office"
+    assert payload.default_office_type == "national_ip_office"
+    assert payload.remarks == ""
+
+
+def test_create_country_allows_complete_fields_without_source_verification(monkeypatch) -> None:
+    reference = JurisdictionReferenceCandidate(
+        reference_id="ref-bd",
+        standard_code="BD",
+        display_code="BD",
+        name_cn="孟加拉国",
+        name_en="Bangladesh",
+        aliases=["BD", "Bangladesh"],
+        jurisdiction_type="single_country",
+        reference_category="country",
+        business_scope=["patent"],
+        visibility_scope="country_master_reference",
+        candidate_status="candidate",
+        quote_selectable_default=False,
+        default_business_economic_regions=["SOUTH_ASIA"],
+        source_name="WIPO ST.3",
+        source_url="https://example.test",
+        source_version="current",
+        source_note="",
+        default_office_name_cn="专利、外观设计和商标局",
+        default_office_name_en="Department of Patents, Designs and Trademarks",
+        default_office_type="national_ip_office",
+        default_office_source_note="WIPO_IP_OFFICES_DIRECTORY",
+    )
+    inserted: list[dict[str, object]] = []
+
+    monkeypatch.setattr(quotation_service, "get_jurisdiction_reference_candidate", lambda reference_id: reference)
+
+    def insert(record: dict[str, object]) -> dict[str, object]:
+        inserted.append(record)
+        return {
+            "code": "BD",
+            "name_cn": record["name_cn"],
+            "name_en": record["name_en"],
+            "default_currency": "USD",
+            "country_type": "单一国家",
+            "enabled": record["enabled"],
+            "business_region": record["business_region"],
+            "international_region": record["international_region"],
+            "display_code": record["display_code"],
+            "jurisdiction_type": record["jurisdiction_type"],
+            "is_enabled": record["is_enabled"],
+            "source_verified": record["source_verified"],
+            "source_verified_at": record["source_verified_at"],
+            "source_verified_by": record["source_verified_by"],
+            "review_status": record["review_status"],
+            "default_office_name_en": record["default_office_name_en"],
+            "default_office_type": record["default_office_type"],
+        }
+
+    monkeypatch.setattr(quotation_service.mysql, "insert_country_config", insert)
+
+    country = quotation_service.create_country_config(
+        CountryCreate(
+            reference_id="ref-bd",
+            name_cn="孟加拉国",
+            name_en="Bangladesh",
+            display_code="BD",
+            international_region="Asia",
+            business_region=["SOUTH_ASIA"],
+            default_office_name_en="Department of Patents, Designs and Trademarks",
+            default_office_type="national_ip_office",
+            source_verified=False,
+        ),
+        {"email": "admin@example.com"},
+    )
+
+    assert country.code == "BD"
+    assert inserted[0]["source_verified"] is False
+    assert inserted[0]["source_verified_at"] is None
+    assert inserted[0]["source_verified_by"] is None
+    assert inserted[0]["review_status"] == "pending_review"
+
+
+def test_source_review_status_can_return_to_needs_update(monkeypatch) -> None:
+    reference = JurisdictionReferenceCandidate(
+        reference_id="ref-bd",
+        standard_code="BD",
+        display_code="BD",
+        name_cn="孟加拉国",
+        name_en="Bangladesh",
+        aliases=["BD"],
+        jurisdiction_type="single_country",
+        reference_category="country",
+        business_scope=["patent"],
+        visibility_scope="country_master_reference",
+        candidate_status="candidate",
+        quote_selectable_default=False,
+        default_business_economic_regions=["SOUTH_ASIA"],
+        source_name="WIPO ST.3",
+        source_url="https://example.test",
+        source_version="current",
+        source_note="",
+        default_office_name_en="Department of Patents, Designs and Trademarks",
+        default_office_type="national_ip_office",
+    )
+    inserted: list[dict[str, object]] = []
+    monkeypatch.setattr(quotation_service, "get_jurisdiction_reference_candidate", lambda reference_id: reference)
+    monkeypatch.setattr(quotation_service.mysql, "insert_country_config", lambda record: inserted.append(record) or {
+        "code": "BD",
+        "name_cn": record["name_cn"],
+        "name_en": record["name_en"],
+        "default_currency": "USD",
+        "enabled": record["enabled"],
+        "business_region": record["business_region"],
+        "international_region": record["international_region"],
+        "display_code": record["display_code"],
+        "jurisdiction_type": record["jurisdiction_type"],
+        "is_enabled": record["is_enabled"],
+        "review_status": record["review_status"],
+    })
+
+    quotation_service.create_country_config(
+        CountryCreate(
+            reference_id="ref-bd",
+            name_cn="孟加拉国",
+            name_en="Bangladesh",
+            display_code="BD",
+            international_region="Asia",
+            business_region=["SOUTH_ASIA"],
+            default_office_name_en="Department of Patents, Designs and Trademarks",
+            default_office_type="national_ip_office",
+            source_verified=False,
+            review_status="needs_update",
+        ),
+        {"email": "admin@example.com"},
+    )
+
+    assert inserted[0]["review_status"] == "needs_update"
+
+
+def test_wipo_international_organization_does_not_use_country_required_rules(monkeypatch) -> None:
+    reference = JurisdictionReferenceCandidate(
+        reference_id="ref-wo",
+        standard_code="WO",
+        display_code="WIPO",
+        name_cn="世界知识产权组织",
+        name_en="World Intellectual Property Organization",
+        aliases=["WO", "WIPO"],
+        jurisdiction_type="international_organization",
+        reference_category="international_organization",
+        business_scope=["patent"],
+        visibility_scope="country_master_reference",
+        candidate_status="candidate",
+        quote_selectable_default=False,
+        default_business_economic_regions=[],
+        source_name="WIPO ST.3",
+        source_url="https://example.test",
+        source_version="current",
+        source_note="",
+    )
+    created_payloads: list[object] = []
+
+    monkeypatch.setattr(quotation_service, "get_jurisdiction_reference_candidate", lambda reference_id: reference)
+    monkeypatch.setattr(
+        quotation_service.mysql,
+        "inspect_country_reference_status",
+        lambda standard_code, display_code: {"status": "not_exists"},
+    )
+
+    def create_country(payload, current_user):
+        created_payloads.append(payload)
+        return quotation_service.Country.model_validate({
+            "code": "WO",
+            "name_cn": payload.name_cn,
+            "name_en": payload.name_en,
+            "default_currency": "USD",
+            "enabled": payload.enabled,
+            "business_region": payload.business_region,
+            "international_region": payload.international_region,
+            "display_code": payload.display_code,
+            "jurisdiction_type": payload.jurisdiction_type,
+            "is_enabled": payload.is_enabled,
+            "review_status": payload.review_status,
+        })
+
+    monkeypatch.setattr(quotation_service, "create_country_config", create_country)
+
+    result = create_countries_from_reference_bulk(
+        CountryBulkFromReferenceRequest(
+            reference_ids=["ref-wo"],
+            staging_items=[
+                CountryBulkFromReferenceStagingItem(
+                    reference_id="ref-wo",
+                    name_cn="世界知识产权组织",
+                    name_en="World Intellectual Property Organization",
+                    display_code="WIPO",
+                    jurisdiction_type="international_organization",
+                    international_region="",
+                    business_region=[],
+                    default_office_name_cn="",
+                    default_office_name_en="",
+                    default_office_type="",
+                )
+            ],
+            source_verified=False,
+        ),
+        {"email": "admin@example.com"},
+    )
+
+    assert result.created_count == 1
+    assert result.failed_count == 0
+    assert created_payloads[0].business_region == []
+    assert created_payloads[0].international_region == ""
+    assert created_payloads[0].review_status == "pending_review"
+
+
+def test_country_master_reference_candidates_merge_aliases_and_hide_reserved() -> None:
+    def ref(code: str, display: str, category: str = "country", jurisdiction_type: str = "single_country") -> JurisdictionReferenceCandidate:
+        return JurisdictionReferenceCandidate(
+            reference_id=f"ref-{code.lower()}",
+            standard_code=code,
+            display_code=display,
+            name_cn=display,
+            name_en=display,
+            aliases=[code, display],
+            jurisdiction_type=jurisdiction_type,
+            reference_category=category,
+            business_scope=["patent"],
+            visibility_scope="country_master_reference",
+            candidate_status="candidate",
+            quote_selectable_default=False,
+            default_business_economic_regions=[],
+            source_name="WIPO ST.3",
+            source_url="https://example.test",
+            source_version="current",
+            source_note="",
+        )
+
+    items = quotation_service._country_master_reference_candidates([  # noqa: SLF001
+        ref("WO", "WIPO", "international_organization", "international_organization"),
+        ref("IB", "IB", "international_organization", "international_organization"),
+        ref("EU", "EU", "international_organization", "international_organization"),
+        ref("EM", "EUIPO", "regional_office", "regional_office"),
+        ref("EUIPO", "EUIPO", "regional_office", "regional_office"),
+        ref("EP", "EPO", "regional_office", "regional_office"),
+        ref("PCT", "PCT", "treaty_route", "treaty_entry"),
+        ref("HAGUE", "HAGUE", "treaty_route", "treaty_entry"),
+        ref("MADRID", "MADRID", "treaty_route", "treaty_entry"),
+        ref("NICE", "NICE", "treaty_route", "treaty_entry"),
+    ])
+
+    codes = {(item.standard_code, item.display_code) for item in items}
+    assert ("WO", "WIPO") in codes
+    assert ("EM", "EUIPO") in codes
+    assert ("EP", "EPO") in codes
+    assert all(code not in {item.standard_code for item in items} for code in {"IB", "EU", "PCT", "HAGUE", "MADRID", "NICE", "EUIPO"})
 
 
 def test_quote_jurisdiction_preview_filters_and_groups(monkeypatch) -> None:

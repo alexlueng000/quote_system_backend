@@ -6,6 +6,8 @@ from decimal import Decimal
 from uuid import uuid4
 
 from app.db import mysql
+from app.reference.jurisdiction_field_sources import BUSINESS_TAGS_BY_CODE, UN_M49_REGION_BY_CODE
+from app.reference.jurisdiction_office_directory import office_directory_item_for_code
 from app.reference.jurisdictions import JURISDICTION_REFERENCES
 from app.schemas.quotation import (
     ApprovalRequestCreate,
@@ -200,7 +202,10 @@ def list_jurisdiction_references(
     include_hidden: bool = False,
 ) -> JurisdictionReferenceListResponse:
     rows = mysql.fetch_jurisdiction_reference_registry(keyword=keyword, include_hidden=include_hidden)
-    items = [JurisdictionReferenceCandidate.model_validate(row) for row in rows]
+    items = _country_master_reference_candidates(
+        [JurisdictionReferenceCandidate.model_validate(row) for row in rows],
+        include_hidden=include_hidden,
+    )
     return JurisdictionReferenceListResponse(items=items, total=len(items))
 
 
@@ -211,11 +216,178 @@ def get_jurisdiction_reference_candidate(reference_id: str) -> JurisdictionRefer
 
 def _reference_hidden_or_trademark_only(reference: JurisdictionReferenceCandidate) -> bool:
     business_scope = {item.lower() for item in reference.business_scope}
+    standard_code = reference.standard_code.upper()
+    display_code = reference.display_code.upper()
     return (
         reference.visibility_scope == "reserved_hidden"
         or reference.reserved_reason == "trademark_reserved"
+        or reference.reference_category == "treaty_route"
+        or standard_code in REFERENCE_DEFAULT_HIDDEN_CODES
+        or display_code in REFERENCE_DEFAULT_HIDDEN_CODES
         or (business_scope and business_scope <= {"trademark"})
     )
+
+
+REFERENCE_CANONICAL_CODES = {
+    "IB": "WO",
+    "WIPO": "WO",
+    "EPO": "EP",
+    "EUIPO": "EM",
+    "OAPI": "OA",
+    "ARIPO": "AP",
+    "EAPO": "EA",
+}
+REFERENCE_DEFAULT_HIDDEN_CODES = {"EU", "IB", "PCT", "HAGUE", "MADRID", "NICE"}
+REFERENCE_ALLOWED_INTERNATIONAL_CODES = {"WO"}
+REFERENCE_GEO_REGION_BY_CODE = {**UN_M49_REGION_BY_CODE, "EP": "Europe", "EM": "Europe", "WO": "Other"}
+REFERENCE_BUSINESS_TAGS_BY_CODE = BUSINESS_TAGS_BY_CODE
+FIELD_SOURCE_NAME = "字段级来源：标准代码=WIPO_ST3；地理区域=UN_M49；主管局=WIPO_IP_OFFICES_DIRECTORY；商务/市场标签=BUSINESS_REGION_SOURCE"
+FIELD_SOURCE_URL = (
+    "WIPO_ST3 https://www.wipo.int/standards/en/part_03_standards.html; "
+    "UN_M49 https://unstats.un.org/unsd/methodology/m49/; "
+    "WIPO_IP_OFFICES_DIRECTORY https://www.wipo.int/en/web/country-profiles/directory-ip-offices"
+)
+FIELD_SOURCE_VERSION = "WIPO ST.3/UN M49/WIPO IP Offices current; business tags 2026-06"
+FIELD_SOURCE_NOTE = (
+    "created_from_reference：候选对象仅用于带出主档字段；WIPO Lex / treaty reference baseline 只作为候选池补充来源，"
+    "不作为地理区域、主管局或商务/市场标签来源。"
+)
+
+
+def _reference_canonical_code(reference: JurisdictionReferenceCandidate) -> str:
+    for code in (reference.standard_code, reference.display_code, *reference.aliases):
+        normalized = code.upper()
+        if normalized in REFERENCE_CANONICAL_CODES:
+            return REFERENCE_CANONICAL_CODES[normalized]
+    return reference.standard_code.upper()
+
+
+def _country_master_reference_candidates(
+    references: list[JurisdictionReferenceCandidate],
+    include_hidden: bool = False,
+) -> list[JurisdictionReferenceCandidate]:
+    selected: dict[str, JurisdictionReferenceCandidate] = {}
+    for reference in references:
+        standard_code = reference.standard_code.upper()
+        display_code = reference.display_code.upper()
+        if not include_hidden and (standard_code in REFERENCE_DEFAULT_HIDDEN_CODES or display_code in REFERENCE_DEFAULT_HIDDEN_CODES):
+            continue
+        if not include_hidden and reference.reference_category == "treaty_route":
+            continue
+        if (
+            not include_hidden
+            and reference.reference_category == "international_organization"
+            and _reference_canonical_code(reference) not in REFERENCE_ALLOWED_INTERNATIONAL_CODES
+        ):
+            continue
+        if not include_hidden and _reference_hidden_or_trademark_only(reference):
+            continue
+        canonical = _reference_canonical_code(reference)
+        current = selected.get(canonical)
+        if current is None or _reference_preferred_rank(reference) < _reference_preferred_rank(current):
+            selected[canonical] = reference
+    return list(selected.values())
+
+
+def _reference_preferred_rank(reference: JurisdictionReferenceCandidate) -> tuple[int, str]:
+    code = reference.standard_code.upper()
+    display = reference.display_code.upper()
+    if code in {"WO", "EP", "EM", "OA", "AP", "EA"}:
+        return (0, code)
+    if display in {"WIPO", "EPO", "EUIPO", "OAPI", "ARIPO", "EAPO"}:
+        return (1, display)
+    return (2, code)
+
+
+def _reference_default_business_tags(reference: object) -> list[str]:
+    code = str(getattr(reference, "standard_code", "")).upper()
+    tags = list(REFERENCE_BUSINESS_TAGS_BY_CODE.get(code, ())) or [
+        tag for tag in getattr(reference, "default_business_economic_regions", []) if tag
+    ]
+    if len(tags) > 1 and "OTHER" in tags:
+        tags = [tag for tag in tags if tag != "OTHER"]
+    return [] if tags == ["OTHER"] else tags
+
+
+def _reference_geo_region(reference: object) -> str:
+    code = str(getattr(reference, "standard_code", "")).upper()
+    region = str(getattr(reference, "geo_region", "") or "")
+    if region and region != "Other":
+        return region
+    if not _is_country_like_jurisdiction_type(str(getattr(reference, "jurisdiction_type", "") or "")):
+        return ""
+    return REFERENCE_GEO_REGION_BY_CODE.get(code, "")
+
+
+def _reference_default_office_fields(reference: object) -> dict[str, object]:
+    code = str(getattr(reference, "standard_code", "")).upper()
+    reference_office_name_en = str(getattr(reference, "default_office_name_en", "") or "")
+    if reference_office_name_en:
+        office_code = str(getattr(reference, "default_office_code", "") or "")
+        office_type = str(getattr(reference, "default_office_type", "") or "") or _office_type_for_reference(reference)
+        return {
+            "default_office_jurisdiction_id": f"jur-{code}" if office_code in {"EPO", "EUIPO", "WIPO/IB"} else None,
+            "default_office_code": office_code,
+            "default_office_name_cn": str(getattr(reference, "default_office_name_cn", "") or ""),
+            "default_office_name_en": reference_office_name_en,
+            "default_office_type": office_type,
+            "default_office_source_note": str(getattr(reference, "default_office_source_note", "") or "WIPO_IP_OFFICES_DIRECTORY"),
+        }
+    office = office_directory_item_for_code(code)
+    if office is None:
+        return {
+            "default_office_code": "",
+            "default_office_name_cn": "",
+            "default_office_name_en": "",
+            "default_office_type": "",
+            "default_office_source_note": "待维护；未在当前 WIPO_IP_OFFICES_DIRECTORY seed 中匹配到主管局，需按官方主管局来源复核。",
+        }
+    return {
+        "default_office_jurisdiction_id": f"jur-{code}" if office.office_display_code in {"EPO", "EUIPO", "WIPO/IB"} else None,
+        "default_office_code": office.office_display_code,
+        "default_office_name_cn": office.office_name_cn,
+        "default_office_name_en": office.office_name_en,
+        "default_office_type": office.office_type,
+        "default_office_source_note": f"{office.source_id}；{office.source_note}",
+    }
+
+
+def _office_type_for_reference(reference: object) -> str:
+    category = str(getattr(reference, "reference_category", "") or "")
+    jurisdiction_type = str(getattr(reference, "jurisdiction_type", "") or "")
+    if category == "regional_office" or jurisdiction_type == "regional_office":
+        return "regional_office"
+    if category == "international_organization" or jurisdiction_type == "international_organization":
+        return "international_office"
+    return "national_ip_office"
+
+
+def _reference_field_source_fields() -> dict[str, str]:
+    return {
+        "source_name": FIELD_SOURCE_NAME,
+        "source_url": FIELD_SOURCE_URL,
+        "source_version": FIELD_SOURCE_VERSION,
+        "source_note": FIELD_SOURCE_NOTE,
+    }
+
+
+COUNTRY_LIKE_JURISDICTION_TYPES = {"single_country", "special_region"}
+
+
+def _is_country_like_jurisdiction_type(jurisdiction_type: str) -> bool:
+    return jurisdiction_type in COUNTRY_LIKE_JURISDICTION_TYPES
+
+
+def _record_display_name(record: dict[str, object]) -> str:
+    return str(record.get("name_en") or record.get("name_cn") or record.get("display_code") or record.get("code") or "").strip()
+
+
+def _review_status_for_source_state(source_verified: bool, requested_status: str | None) -> str:
+    if source_verified:
+        return "verified"
+    if requested_status in {"pending_review", "needs_update", "deprecated"}:
+        return requested_status
+    return "pending_review"
 
 
 def list_jurisdiction_data_sources() -> list[JurisdictionDataSource]:
@@ -696,17 +868,33 @@ def create_country_config(payload: CountryCreate, current_user: dict[str, object
         raise KeyError("JURISDICTION_REFERENCE_NOT_FOUND")
     if _reference_hidden_or_trademark_only(reference):
         raise ValueError("REFERENCE_NOT_AVAILABLE_FOR_COUNTRY_MASTER")
-    verified_at = payload.last_verified_at or payload.source_verified_at or datetime.now(timezone.utc)
     display_code = payload.display_code.strip() or reference.display_code
     name_cn = payload.name_cn.strip() or reference.name_cn
     name_en = payload.name_en.strip() or reference.name_en
-    enabled = bool(payload.enabled)
+    jurisdiction_type = payload.jurisdiction_type or reference.jurisdiction_type
+    office_fields = _reference_default_office_fields(reference)
+    for key in (
+        "default_office_jurisdiction_id",
+        "default_office_code",
+        "default_office_name_cn",
+        "default_office_name_en",
+        "default_office_type",
+        "default_office_source_note",
+    ):
+        value = getattr(payload, key, None)
+        if value not in (None, ""):
+            office_fields[key] = value
+    enabled = reference.candidate_status == "active" and reference.quote_selectable_default and bool(payload.enabled)
     manual_override = (
         payload.manual_override
         or display_code != reference.display_code
         or name_cn != reference.name_cn
         or name_en != reference.name_en
     )
+    source_verified = bool(payload.source_verified)
+    verified_at = payload.last_verified_at or payload.source_verified_at or (datetime.now(timezone.utc) if source_verified else None)
+    verified_by = payload.source_verified_by or (str(current_user.get("email") or current_user.get("id") or "local_admin") if source_verified else None)
+    review_status = _review_status_for_source_state(source_verified, payload.review_status)
     values = {
         **payload.model_dump(),
         "code": reference.standard_code,
@@ -716,14 +904,12 @@ def create_country_config(payload: CountryCreate, current_user: dict[str, object
         "name_cn": name_cn,
         "name_en": name_en,
         "enabled": enabled,
-        "country_type": _jurisdiction_type_label(reference.jurisdiction_type),
-        "jurisdiction_type": reference.jurisdiction_type,
-        "international_region": reference.geo_region,
-        "business_region": payload.business_region or list(reference.default_business_economic_regions),
-        "source_name": reference.source_name,
-        "source_url": reference.source_url,
-        "source_version": reference.source_version,
-        "source_note": reference.source_note,
+        "country_type": _jurisdiction_type_label(jurisdiction_type),
+        "jurisdiction_type": jurisdiction_type,
+        "international_region": payload.international_region or _reference_geo_region(reference),
+        "business_region": list(payload.business_region),
+        **_reference_field_source_fields(),
+        **office_fields,
         # Legacy compatibility only. Currency rules belong in the FX/tax module.
         "default_currency": reference.default_currency_legacy,
         "is_enabled": enabled,
@@ -732,12 +918,15 @@ def create_country_config(payload: CountryCreate, current_user: dict[str, object
         "quote_option_group": reference.reference_category,
         "quote_display_name": f"{name_cn} ({display_code})",
         "not_selectable_reason": reference.not_selectable_reason,
-        "source_verified": True,
+        "source_verified": source_verified,
         "last_verified_at": verified_at,
         "source_verified_at": verified_at,
-        "source_verified_by": payload.source_verified_by or str(current_user.get("email") or current_user.get("id") or "local_admin"),
+        "source_verified_by": verified_by,
+        "review_status": review_status,
         "manual_override": manual_override,
+        "remarks": payload.remarks or "",
     }
+    _validate_staged_country_record(values)
     return Country.model_validate(mysql.insert_country_config(values))
 
 
@@ -745,14 +934,17 @@ def create_countries_from_reference_bulk(
     payload: CountryBulkFromReferenceRequest,
     current_user: dict[str, object],
 ) -> CountryBulkFromReferenceResponse:
-    verified_at = payload.source_verified_at or datetime.now(timezone.utc)
-    verified_by = payload.source_verified_by or str(
+    source_verified = bool(payload.source_verified)
+    verified_at = payload.source_verified_at or (datetime.now(timezone.utc) if source_verified else None)
+    verified_by = payload.source_verified_by or (str(
         current_user.get("email") or current_user.get("id") or "local_admin"
-    )
+    ) if source_verified else None)
     response = CountryBulkFromReferenceResponse()
     seen_reference_ids: set[str] = set()
+    staging_by_reference_id = {item.reference_id: item for item in payload.staging_items}
+    requested_reference_ids = payload.reference_ids or [item.reference_id for item in payload.staging_items]
 
-    for reference_id in payload.reference_ids:
+    for reference_id in requested_reference_ids:
         if reference_id in seen_reference_ids:
             response.skipped.append(
                 CountryBulkFromReferenceResult(
@@ -798,8 +990,22 @@ def create_countries_from_reference_bulk(
             "name_cn": reference.name_cn,
             "name_en": reference.name_en,
         }
+        staging_item = staging_by_reference_id.get(reference.reference_id)
+        try:
+            staged_record = _staged_country_record(reference, staging_item, verified_at, verified_by, source_verified)
+        except ValueError as exc:
+            response.failed.append(
+                CountryBulkFromReferenceResult(
+                    **base_result,
+                    status="failed",
+                    existence_status="invalid_staging",
+                    reason=str(exc),
+                )
+            )
+            continue
         existence = mysql.inspect_country_reference_status(reference.standard_code, reference.display_code)
         existence_status = str(existence.get("status") or "not_exists")
+        enabled_from_reference = reference.candidate_status == "active" and reference.quote_selectable_default
         if existence_status == "active_exists":
             response.skipped.append(
                 CountryBulkFromReferenceResult(
@@ -813,32 +1019,7 @@ def create_countries_from_reference_bulk(
         if existence_status in {"soft_deleted_exists", "legacy_exists_only"}:
             try:
                 country = mysql.restore_country_config_from_reference(
-                    {
-                        "code": reference.standard_code,
-                        "name_cn": reference.name_cn,
-                        "name_en": reference.name_en,
-                        "enabled": True,
-                        "business_region": list(reference.default_business_economic_regions),
-                        "region_remark": payload.batch_note,
-                        "country_type": _jurisdiction_type_label(reference.jurisdiction_type),
-                        "default_currency": reference.default_currency_legacy,
-                        "internal_code": reference.standard_code,
-                        "standard_code": reference.standard_code,
-                        "display_code": reference.display_code,
-                        "jurisdiction_type": reference.jurisdiction_type,
-                        "is_enabled": True,
-                        "international_region": reference.geo_region,
-                        "source_name": reference.source_name,
-                        "source_url": reference.source_url,
-                        "source_version": reference.source_version,
-                        "source_note": reference.source_note,
-                        "source_verified": True,
-                        "source_verified_at": verified_at,
-                        "last_verified_at": verified_at,
-                        "source_verified_by": verified_by,
-                        "manual_override": False,
-                        "remarks": payload.batch_note,
-                    },
+                    staged_record,
                     existence,
                 )
             except Exception as exc:
@@ -867,24 +1048,7 @@ def create_countries_from_reference_bulk(
             country = create_country_config(
                 CountryCreate(
                     reference_id=reference.reference_id,
-                    code=reference.standard_code,
-                    name_cn=reference.name_cn,
-                    name_en=reference.name_en,
-                    enabled=True,
-                    business_region=list(reference.default_business_economic_regions),
-                    region_remark=payload.batch_note,
-                    internal_code=reference.standard_code,
-                    standard_code=reference.standard_code,
-                    display_code=reference.display_code,
-                    jurisdiction_type=reference.jurisdiction_type,
-                    is_enabled=True,
-                    source_note=reference.source_note,
-                    source_verified=True,
-                    source_verified_at=verified_at,
-                    last_verified_at=verified_at,
-                    source_verified_by=verified_by,
-                    manual_override=False,
-                    remarks=payload.batch_note,
+                    **staged_record,
                 ),
                 current_user,
             )
@@ -921,6 +1085,115 @@ def create_countries_from_reference_bulk(
     return response
 
 
+def _staged_country_record(
+    reference: JurisdictionReferenceCandidate,
+    staging_item: object | None,
+    verified_at: datetime | None,
+    verified_by: str | None,
+    source_verified: bool,
+) -> dict[str, object]:
+    enabled_from_reference = reference.candidate_status == "active" and reference.quote_selectable_default
+    office_fields = _reference_default_office_fields(reference)
+    record: dict[str, object] = {
+        "code": reference.standard_code,
+        "name_cn": reference.name_cn,
+        "name_en": reference.name_en,
+        "enabled": enabled_from_reference,
+        "business_region": _reference_default_business_tags(reference),
+        "region_remark": "",
+        "country_type": _jurisdiction_type_label(reference.jurisdiction_type),
+        "default_currency": reference.default_currency_legacy,
+        "internal_code": reference.standard_code,
+        "standard_code": reference.standard_code,
+        "display_code": reference.display_code,
+        "jurisdiction_type": reference.jurisdiction_type,
+        "is_enabled": enabled_from_reference,
+        "international_region": _reference_geo_region(reference),
+        **_reference_field_source_fields(),
+        **office_fields,
+        "source_verified": source_verified,
+        "source_verified_at": verified_at,
+        "last_verified_at": verified_at,
+        "source_verified_by": verified_by,
+        "review_status": _review_status_for_source_state(source_verified, None),
+        "manual_override": False,
+        "remarks": "",
+        "overwrite_existing_fields": False,
+    }
+    if staging_item is not None:
+        staged_values = staging_item.model_dump()
+        record["overwrite_existing_fields"] = bool(staged_values.get("overwrite_existing_fields"))
+        for key in (
+            "name_cn",
+            "name_en",
+            "display_code",
+            "jurisdiction_type",
+            "international_region",
+            "business_region",
+            "default_office_name_cn",
+            "default_office_name_en",
+            "default_office_code",
+            "default_office_type",
+            "remarks",
+        ):
+            value = staged_values.get(key)
+            if key == "business_region" or value not in (None, ""):
+                record[key] = value
+        record["review_status"] = _review_status_for_source_state(source_verified, str(staged_values.get("review_status") or "pending_review"))
+        record["country_type"] = _jurisdiction_type_label(str(record.get("jurisdiction_type") or reference.jurisdiction_type))
+        record["manual_override"] = _staging_changes_reference_defaults(reference, record)
+    _validate_staged_country_record(record)
+    return record
+
+
+def _staging_changes_reference_defaults(reference: JurisdictionReferenceCandidate, record: dict[str, object]) -> bool:
+    office = _reference_default_office_fields(reference)
+    return any(
+        [
+            str(record.get("name_cn") or "") != reference.name_cn,
+            str(record.get("name_en") or "") != reference.name_en,
+            str(record.get("display_code") or "") != reference.display_code,
+            str(record.get("jurisdiction_type") or "") != reference.jurisdiction_type,
+            str(record.get("international_region") or "") != _reference_geo_region(reference),
+            list(record.get("business_region") or []) != _reference_default_business_tags(reference),
+            str(record.get("default_office_code") or "") != str(office.get("default_office_code") or ""),
+            str(record.get("default_office_name_cn") or "") != str(office.get("default_office_name_cn") or ""),
+            str(record.get("default_office_name_en") or "") != str(office.get("default_office_name_en") or ""),
+            str(record.get("default_office_type") or "") != str(office.get("default_office_type") or ""),
+            bool(record.get("remarks")),
+        ]
+    )
+
+
+def _validate_staged_country_record(record: dict[str, object]) -> None:
+    object_name = _record_display_name(record)
+    jurisdiction_type = str(record.get("jurisdiction_type") or "")
+    issues: list[str] = []
+    if not str(record.get("standard_code") or record.get("code") or "").strip():
+        issues.append("标准代码不能为空")
+    if not str(record.get("name_cn") or "").strip():
+        issues.append("中文名不能为空")
+    if not str(record.get("name_en") or "").strip():
+        issues.append("英文名不能为空")
+    if not str(record.get("display_code") or "").strip():
+        issues.append("业务展示代码不能为空")
+    if not jurisdiction_type:
+        issues.append("类型不能为空")
+    if "enabled" not in record and "is_enabled" not in record:
+        issues.append("启用状态不能为空")
+    if _is_country_like_jurisdiction_type(jurisdiction_type):
+        if not str(record.get("international_region") or "").strip():
+            issues.append("地理区域未配置")
+        if not list(record.get("business_region") or []):
+            issues.append("商务/市场标签不能为空")
+        if not str(record.get("default_office_name_en") or "").strip() and not str(record.get("default_office_name_cn") or "").strip():
+            issues.append("主管局名称不能为空")
+        if not str(record.get("default_office_type") or "").strip():
+            issues.append("主管局类型不能为空")
+    if issues:
+        raise ValueError("；".join(f"{object_name}：{issue}" for issue in issues))
+
+
 def update_country_config(country_code: str, payload: CountryUpdate) -> Country:
     values = payload.model_dump(exclude_unset=True)
     return Country.model_validate(mysql.update_country_config(country_code, values))
@@ -954,7 +1227,7 @@ def restore_country_config(country_code: str, current_user: dict[str, object]) -
             "name_cn": reference.name_cn,
             "name_en": reference.name_en,
             "enabled": True,
-            "business_region": list(reference.default_business_economic_regions),
+            "business_region": _reference_default_business_tags(reference),
             "country_type": _jurisdiction_type_label(jurisdiction_type),
             "default_currency": reference.default_currency_legacy,
             "internal_code": reference.standard_code,
@@ -962,11 +1235,9 @@ def restore_country_config(country_code: str, current_user: dict[str, object]) -
             "display_code": reference.display_code,
             "jurisdiction_type": jurisdiction_type,
             "is_enabled": True,
-            "international_region": reference.geo_region,
-            "source_name": reference.source_name,
-            "source_url": reference.source_url,
-            "source_version": reference.source_version,
-            "source_note": reference.source_note,
+            "international_region": _reference_geo_region(reference),
+            **_reference_field_source_fields(),
+            **_reference_default_office_fields(reference),
             "source_verified": True,
             "source_verified_at": verified_at,
             "last_verified_at": verified_at,

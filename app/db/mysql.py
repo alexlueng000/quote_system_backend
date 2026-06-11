@@ -14,6 +14,11 @@ from dotenv import load_dotenv
 from pymysql.connections import Connection
 from pymysql.cursors import DictCursor
 
+from app.reference.jurisdiction_office_directory import (
+    default_office_directory_items,
+    office_directory_item_for_code,
+)
+from app.reference.jurisdiction_field_sources import BUSINESS_TAGS_BY_CODE, UN_M49_REGION_BY_CODE
 from app.reference.jurisdiction_registry import default_registry_items
 from app.schemas.quotation import QuotationItem
 
@@ -412,6 +417,7 @@ def fetch_country_config(include_deleted: bool = False) -> dict[str, list[dict[s
                 if _column_exists(cursor, "jurisdictions", "source_note")
                 else "'' AS source_note"
             )
+            office_select_expr = _jurisdiction_office_select_expr(cursor)
             cursor.execute(
                 f"""
                 SELECT c.code, c.name_cn, c.name_en, c.default_currency,
@@ -434,6 +440,7 @@ def fetch_country_config(include_deleted: bool = False) -> dict[str, list[dict[s
                        {source_verified_by_expr},
                        COALESCE(j.manual_override, 0) AS manual_override,
                        COALESCE(j.remarks, '') AS remarks,
+                       {office_select_expr},
                        {country_deleted_expr},
                        {deleted_at_expr},
                        {deleted_by_expr},
@@ -448,9 +455,9 @@ def fetch_country_config(include_deleted: bool = False) -> dict[str, list[dict[s
         else:
             country_has_deleted = _column_exists(cursor, "countries", "is_deleted")
             deleted_select = (
-                ", code AS standard_code, '' AS source_note, COALESCE(is_deleted, 0) AS is_deleted, deleted_at, COALESCE(deleted_by, '') AS deleted_by, COALESCE(delete_reason, '') AS delete_reason"
+                ", code AS standard_code, '' AS source_note, NULL AS default_office_jurisdiction_id, '' AS default_office_code, '' AS default_office_name_cn, '' AS default_office_name_en, '' AS default_office_type, '' AS default_office_source_note, COALESCE(is_deleted, 0) AS is_deleted, deleted_at, COALESCE(deleted_by, '') AS deleted_by, COALESCE(delete_reason, '') AS delete_reason"
                 if country_has_deleted
-                else ", code AS standard_code, '' AS source_note, CASE WHEN enabled = 0 THEN 1 ELSE 0 END AS is_deleted, NULL AS deleted_at, '' AS deleted_by, '' AS delete_reason"
+                else ", code AS standard_code, '' AS source_note, NULL AS default_office_jurisdiction_id, '' AS default_office_code, '' AS default_office_name_cn, '' AS default_office_name_en, '' AS default_office_type, '' AS default_office_source_note, CASE WHEN enabled = 0 THEN 1 ELSE 0 END AS is_deleted, NULL AS deleted_at, '' AS deleted_by, '' AS delete_reason"
             )
             if include_deleted:
                 deleted_where = ""
@@ -624,6 +631,32 @@ def fetch_jurisdiction_reference_registry(
         if not _table_exists(cursor, "jurisdiction_reference_registry"):
             return _fallback_reference_registry(keyword, include_hidden)
         _seed_reference_registry_if_empty(cursor)
+        _seed_office_directory_registry_if_available(cursor)
+        office_join = ""
+        office_select = """
+                       '' AS directory_office_display_code,
+                       '' AS directory_office_name_cn,
+                       '' AS directory_office_name_en,
+                       '' AS directory_office_type,
+                       '' AS directory_office_source_note
+        """
+        if _table_exists(cursor, "jurisdiction_office_directory_registry"):
+            office_join = """
+            LEFT JOIN jurisdiction_office_directory_registry d
+              ON d.is_active = 1
+             AND (
+               UPPER(d.country_code) = UPPER(r.standard_code)
+               OR UPPER(d.jurisdiction_code) = UPPER(r.standard_code)
+               OR UPPER(d.office_display_code) = UPPER(r.display_code)
+             )
+            """
+            office_select = """
+                       d.office_display_code AS directory_office_display_code,
+                       d.office_name_cn AS directory_office_name_cn,
+                       d.office_name_en AS directory_office_name_en,
+                       d.office_type AS directory_office_type,
+                       d.source_note AS directory_office_source_note
+            """
         where_parts = ["r.is_active = 1"]
         params: list[object] = []
         if not include_hidden:
@@ -645,9 +678,11 @@ def fetch_jurisdiction_reference_registry(
             params.extend([like_value] * 5)
         cursor.execute(
             f"""
-            SELECT r.*, j.jurisdiction_id AS matched_jurisdiction_id
+            SELECT r.*, j.jurisdiction_id AS matched_jurisdiction_id,
+                   {office_select}
             FROM jurisdiction_reference_registry r
             LEFT JOIN jurisdictions j ON j.jurisdiction_id = r.jurisdiction_id
+            {office_join}
             WHERE {' AND '.join(where_parts)}
             ORDER BY
               CASE r.reference_category
@@ -675,11 +710,39 @@ def fetch_jurisdiction_reference_registry_item(reference_id: str) -> dict[str, o
                     return item
             return None
         _seed_reference_registry_if_empty(cursor)
-        cursor.execute(
+        _seed_office_directory_registry_if_available(cursor)
+        office_join = ""
+        office_select = """
+                   '' AS directory_office_display_code,
+                   '' AS directory_office_name_cn,
+                   '' AS directory_office_name_en,
+                   '' AS directory_office_type,
+                   '' AS directory_office_source_note
+        """
+        if _table_exists(cursor, "jurisdiction_office_directory_registry"):
+            office_join = """
+            LEFT JOIN jurisdiction_office_directory_registry d
+              ON d.is_active = 1
+             AND (
+               UPPER(d.country_code) = UPPER(r.standard_code)
+               OR UPPER(d.jurisdiction_code) = UPPER(r.standard_code)
+               OR UPPER(d.office_display_code) = UPPER(r.display_code)
+             )
             """
-            SELECT *
-            FROM jurisdiction_reference_registry
-            WHERE reference_id = %s AND is_active = 1
+            office_select = """
+                   d.office_display_code AS directory_office_display_code,
+                   d.office_name_cn AS directory_office_name_cn,
+                   d.office_name_en AS directory_office_name_en,
+                   d.office_type AS directory_office_type,
+                   d.source_note AS directory_office_source_note
+            """
+        cursor.execute(
+            f"""
+            SELECT r.*,
+                   {office_select}
+            FROM jurisdiction_reference_registry r
+            {office_join}
+            WHERE r.reference_id = %s AND r.is_active = 1
             LIMIT 1
             """,
             (reference_id,),
@@ -870,6 +933,7 @@ def update_country_config(country_code: str, values: dict[str, object]) -> dict[
         "name_cn",
         "name_en",
         "enabled",
+        "international_region",
         "business_region",
         "region_remark",
     }
@@ -1033,6 +1097,7 @@ def restore_country_config_from_reference(
     ).upper()
     if not country_code:
         raise KeyError("COUNTRY_CODE_REQUIRED")
+    overwrite_existing_fields = _truthy(record.get("overwrite_existing_fields"))
 
     with connection_scope() as connection, connection.cursor() as cursor:
         cursor.execute("SELECT * FROM countries WHERE code = %s LIMIT 1", (country_code,))
@@ -1067,16 +1132,19 @@ def restore_country_config_from_reference(
                 insert_values,
             )
         else:
+            business_region_value = record.get("business_region") or []
+            if not overwrite_existing_fields and _loads_json_list_or_legacy(country.get("business_region")):
+                business_region_value = _loads_json_list_or_legacy(country.get("business_region"))
             updates = {
-                "name_cn": record["name_cn"],
-                "name_en": record["name_en"],
+                "name_cn": _restore_value(record.get("name_cn"), country.get("name_cn"), overwrite_existing_fields),
+                "name_en": _restore_value(record.get("name_en"), country.get("name_en"), overwrite_existing_fields),
                 # Legacy compatibility only. Currency rules belong in the FX/tax module.
-                "default_currency": record.get("default_currency") or country.get("default_currency") or "USD",
-                "country_type": record.get("country_type") or country.get("country_type") or "单一国家",
+                "default_currency": _restore_value(record.get("default_currency"), country.get("default_currency"), overwrite_existing_fields) or "USD",
+                "country_type": _restore_value(record.get("country_type"), country.get("country_type"), overwrite_existing_fields) or "单一国家",
                 "enabled": True,
-                "international_region": record.get("international_region") or country.get("international_region") or "",
-                "business_region": _business_tags_to_storage(record.get("business_region") or []),
-                "region_remark": record.get("region_remark") or "",
+                "international_region": _restore_value(record.get("international_region"), country.get("international_region"), overwrite_existing_fields) or "",
+                "business_region": _business_tags_to_storage(business_region_value),
+                "region_remark": _restore_value(record.get("region_remark"), country.get("region_remark"), overwrite_existing_fields) or "",
                 "is_deleted": False,
                 "deleted_at": None,
                 "deleted_by": None,
@@ -1097,6 +1165,30 @@ def restore_country_config_from_reference(
                 "jurisdiction_type": record.get("jurisdiction_type") or _default_jurisdiction_type(country_code, record.get("country_type")),
                 "is_enabled": True,
             }
+            if not overwrite_existing_fields:
+                existing_jurisdiction_id = _country_jurisdiction_id(cursor, country_code)
+                if existing_jurisdiction_id:
+                    cursor.execute("SELECT * FROM jurisdictions WHERE jurisdiction_id = %s LIMIT 1", (existing_jurisdiction_id,))
+                    existing_jurisdiction = _normalize_text_record(cursor.fetchone()) or {}
+                    for field in (
+                        "name_cn",
+                        "name_en",
+                        "display_code",
+                        "jurisdiction_type",
+                        "standard_code",
+                        "source_name",
+                        "source_url",
+                        "source_version",
+                        "source_note",
+                        "remarks",
+                        "default_office_code",
+                        "default_office_name_cn",
+                        "default_office_name_en",
+                        "default_office_type",
+                        "default_office_source_note",
+                    ):
+                        if existing_jurisdiction.get(field) not in (None, ""):
+                            jurisdiction_values[field] = existing_jurisdiction[field]
             _update_country_jurisdiction(cursor, country_code, jurisdiction_values)
             jurisdiction_id = _country_jurisdiction_id(cursor, country_code)
             if jurisdiction_id:
@@ -1127,17 +1219,48 @@ def restore_country_config_from_reference(
     raise KeyError(country_code)
 
 
+def _resolve_country_code_for_delete(cursor: DictCursor, country_code: str) -> str:
+    normalized_code = country_code.upper()
+    cursor.execute("SELECT code FROM countries WHERE UPPER(code) = %s LIMIT 1", (normalized_code,))
+    country = cursor.fetchone()
+    if country and country.get("code"):
+        return str(country["code"]).upper()
+    if not _jurisdiction_compat_available(cursor):
+        raise KeyError(country_code)
+
+    lookup_columns = ["internal_code", "display_code", "wipo_st3_code"]
+    if _column_exists(cursor, "jurisdictions", "standard_code"):
+        lookup_columns.append("standard_code")
+    where_sql = " OR ".join(f"UPPER(j.{column}) = %s" for column in lookup_columns)
+    cursor.execute(
+        f"""
+        SELECT c.code
+        FROM jurisdictions j
+        LEFT JOIN country_jurisdiction_map m ON m.jurisdiction_id = j.jurisdiction_id
+        LEFT JOIN countries c ON c.code = m.country_code OR c.jurisdiction_id = j.jurisdiction_id
+        WHERE {where_sql}
+        LIMIT 1
+        """,
+        tuple([normalized_code] * len(lookup_columns)),
+    )
+    mapped = cursor.fetchone()
+    if mapped and mapped.get("code"):
+        return str(mapped["code"]).upper()
+    raise KeyError(country_code)
+
+
 def soft_delete_country_config(
     country_code: str,
     deleted_by: str,
     delete_reason: str = "",
 ) -> dict[str, object]:
-    country_code = country_code.upper()
+    requested_country_code = country_code.upper()
     with connection_scope() as connection, connection.cursor() as cursor:
+        country_code = _resolve_country_code_for_delete(cursor, requested_country_code)
         cursor.execute("SELECT * FROM countries WHERE code = %s LIMIT 1", (country_code,))
         country = _normalize_text_record(cursor.fetchone())
         if country is None:
-            raise KeyError(country_code)
+            raise KeyError(requested_country_code)
         jurisdiction_id = _country_jurisdiction_id(cursor, country_code)
         references = _country_business_reference_counts(cursor, country_code, jurisdiction_id)
         if references:
@@ -1146,14 +1269,13 @@ def soft_delete_country_config(
         now = datetime.now()
         country_updates: dict[str, object] = {"enabled": False}
         if _column_exists(cursor, "countries", "is_deleted"):
-            country_updates.update(
-                {
-                    "is_deleted": True,
-                    "deleted_at": now,
-                    "deleted_by": deleted_by,
-                    "delete_reason": delete_reason,
-                }
-            )
+            country_updates["is_deleted"] = True
+        if _column_exists(cursor, "countries", "deleted_at"):
+            country_updates["deleted_at"] = now
+        if _column_exists(cursor, "countries", "deleted_by"):
+            country_updates["deleted_by"] = deleted_by
+        if _column_exists(cursor, "countries", "delete_reason"):
+            country_updates["delete_reason"] = delete_reason
         assignments = ", ".join(f"{key} = %s" for key in country_updates)
         cursor.execute(
             f"UPDATE countries SET {assignments} WHERE code = %s",
@@ -1162,14 +1284,13 @@ def soft_delete_country_config(
         if jurisdiction_id and _table_exists(cursor, "jurisdictions"):
             jurisdiction_updates: dict[str, object] = {"is_enabled": False}
             if _column_exists(cursor, "jurisdictions", "is_deleted"):
-                jurisdiction_updates.update(
-                    {
-                        "is_deleted": True,
-                        "deleted_at": now,
-                        "deleted_by": deleted_by,
-                        "delete_reason": delete_reason,
-                    }
-                )
+                jurisdiction_updates["is_deleted"] = True
+            if _column_exists(cursor, "jurisdictions", "deleted_at"):
+                jurisdiction_updates["deleted_at"] = now
+            if _column_exists(cursor, "jurisdictions", "deleted_by"):
+                jurisdiction_updates["deleted_by"] = deleted_by
+            if _column_exists(cursor, "jurisdictions", "delete_reason"):
+                jurisdiction_updates["delete_reason"] = delete_reason
             assignments = ", ".join(f"{key} = %s" for key in jurisdiction_updates)
             cursor.execute(
                 f"UPDATE jurisdictions SET {assignments} WHERE jurisdiction_id = %s",
@@ -2335,12 +2456,12 @@ def _loads_json_list(value: object) -> list[str]:
 
 def _loads_json_list_or_legacy(value: object) -> list[str]:
     if value in (None, ""):
-        return ["OTHER"]
+        return []
     if isinstance(value, list):
-        return [_repair_mojibake_text(str(item)) for item in value if str(item).strip()] or ["OTHER"]
+        return _normalize_business_tag_list([_repair_mojibake_text(str(item)) for item in value if str(item).strip()])
     text = _repair_mojibake_text(str(value)).strip()
     if not text:
-        return ["OTHER"]
+        return []
     try:
         loaded = json.loads(text)
     except json.JSONDecodeError:
@@ -2348,7 +2469,7 @@ def _loads_json_list_or_legacy(value: object) -> list[str]:
             "Europe": "EUROPE",
             "North America": "NORTH_AMERICA",
             "Latin America": "LATIN_AMERICA",
-            "South America": "SOUTH_AMERICA",
+            "South America": "LATIN_AMERICA",
             "Southeast Asia": "SOUTHEAST_ASIA",
             "Middle East": "MIDDLE_EAST",
             "Africa": "AFRICA",
@@ -2357,10 +2478,25 @@ def _loads_json_list_or_legacy(value: object) -> list[str]:
             "Other": "OTHER",
         }
         items = [aliases.get(item.strip(), item.strip()) for item in text.replace("，", ",").split(",")]
-        return [item for item in items if item] or ["OTHER"]
+        return _normalize_business_tag_list([item for item in items if item])
     if not isinstance(loaded, list):
-        return ["OTHER"]
-    return [_repair_mojibake_text(str(item)) for item in loaded if str(item).strip()] or ["OTHER"]
+        return []
+    return _normalize_business_tag_list([_repair_mojibake_text(str(item)) for item in loaded if str(item).strip()])
+
+
+def _normalize_business_tag_list(items: list[str]) -> list[str]:
+    tags: list[str] = []
+    for item in items:
+        tag = item.strip()
+        if not tag:
+            continue
+        if tag == "SOUTH_AMERICA":
+            tag = "LATIN_AMERICA"
+        if tag not in tags:
+            tags.append(tag)
+    if len(tags) > 1 and "OTHER" in tags:
+        tags = [tag for tag in tags if tag != "OTHER"]
+    return tags
 
 
 def _business_tags_to_storage(value: object) -> str:
@@ -2485,6 +2621,24 @@ def _not_selectable_reason_expr(cursor: DictCursor) -> str:
     """
 
 
+def _jurisdiction_office_select_expr(cursor: DictCursor) -> str:
+    columns = [
+        ("default_office_jurisdiction_id", "NULL"),
+        ("default_office_code", "''"),
+        ("default_office_name_cn", "''"),
+        ("default_office_name_en", "''"),
+        ("default_office_type", "''"),
+        ("default_office_source_note", "''"),
+    ]
+    parts = []
+    for column, fallback in columns:
+        if _column_exists(cursor, "jurisdictions", column):
+            parts.append(f"j.{column} AS {column}")
+        else:
+            parts.append(f"{fallback} AS {column}")
+    return ",\n                       ".join(parts)
+
+
 def _seed_reference_registry_if_empty(cursor: DictCursor) -> None:
     if not _table_exists(cursor, "jurisdiction_reference_registry"):
         return
@@ -2576,6 +2730,38 @@ def _seed_reference_registry_if_empty(cursor: DictCursor) -> None:
         WHERE r.jurisdiction_id IS NULL
         """
     )
+
+
+def _seed_office_directory_registry_if_available(cursor: DictCursor) -> None:
+    if not _table_exists(cursor, "jurisdiction_office_directory_registry"):
+        return
+    columns = [
+        "country_code",
+        "jurisdiction_code",
+        "country_name_en",
+        "office_role",
+        "office_name_en",
+        "office_name_cn",
+        "office_display_code",
+        "office_type",
+        "source_id",
+        "source_url",
+        "source_version",
+        "review_status",
+        "is_active",
+        "source_note",
+    ]
+    placeholders = ", ".join(f"%({column})s" for column in columns)
+    updates = ", ".join(f"{column} = VALUES({column})" for column in columns if column != "country_code")
+    for item in default_office_directory_items():
+        cursor.execute(
+            f"""
+            INSERT INTO jurisdiction_office_directory_registry ({', '.join(columns)})
+            VALUES ({placeholders})
+            ON DUPLICATE KEY UPDATE {updates}
+            """,
+            {column: getattr(item, column) for column in columns},
+        )
 
 
 def _sync_reference_registry_link(cursor: DictCursor, standard_code: str, display_code: str) -> None:
@@ -2670,6 +2856,38 @@ def _reference_registry_row(row: dict[str, object]) -> dict[str, object]:
     normalized["quote_selectable_default"] = _truthy(normalized.get("quote_selectable_default"))
     normalized["source_verified"] = _truthy(normalized.get("source_verified"))
     normalized["is_active"] = _truthy(normalized.get("is_active"), default=True)
+    code = str(normalized.get("standard_code") or "").upper()
+    if normalized.get("geo_region") in ("", None, "Other"):
+        normalized["geo_region"] = UN_M49_REGION_BY_CODE.get(code, normalized.get("geo_region") or "")
+    if normalized["default_business_economic_regions"] in (["OTHER"], ["SOUTH_AMERICA"]):
+        normalized["default_business_economic_regions"] = []
+    if code in BUSINESS_TAGS_BY_CODE:
+        normalized["default_business_economic_regions"] = list(BUSINESS_TAGS_BY_CODE[code])
+    if code not in {"PCT", "HAGUE", "MADRID", "NICE"} and normalized.get("source_id") == "WIPO_LEX_REFERENCE":
+        normalized["source_note"] = (
+            "候选来源 / 导入轨迹：WIPO_LEX_REFERENCE。字段来源矩阵：standard_code/display_code=WIPO_ST3；"
+            "international_region=UN_M49；default_office=WIPO_IP_OFFICES_DIRECTORY；business_region=BUSINESS_REGION_SOURCE。"
+            "WIPO Lex 不作为国家主档字段权威来源。"
+        ).strip()
+    directory_item = office_directory_item_for_code(code)
+    normalized["default_office_code"] = normalized.pop("directory_office_display_code", None) or (
+        directory_item.office_display_code if directory_item else ""
+    )
+    normalized["default_office_name_cn"] = normalized.pop("directory_office_name_cn", None) or (
+        directory_item.office_name_cn if directory_item else ""
+    )
+    normalized["default_office_name_en"] = normalized.pop("directory_office_name_en", None) or (
+        directory_item.office_name_en if directory_item else ""
+    )
+    normalized["default_office_type"] = normalized.pop("directory_office_type", None) or (
+        directory_item.office_type if directory_item else ""
+    )
+    source_note = normalized.pop("directory_office_source_note", None) or (
+        directory_item.source_note if directory_item else ""
+    )
+    normalized["default_office_source_note"] = (
+        f"WIPO_IP_OFFICES_DIRECTORY；{source_note}".strip("；") if source_note else ""
+    )
     return normalized
 
 
@@ -2704,6 +2922,15 @@ def _apply_jurisdiction_country_defaults(country: dict[str, object]) -> None:
     country["source_verified_by"] = country.get("source_verified_by") or ""
     country["manual_override"] = bool(country.get("manual_override") or False)
     country["remarks"] = country.get("remarks") or ""
+    country["default_office_jurisdiction_id"] = country.get("default_office_jurisdiction_id") or None
+    for key in (
+        "default_office_code",
+        "default_office_name_cn",
+        "default_office_name_en",
+        "default_office_type",
+        "default_office_source_note",
+    ):
+        country[key] = country.get(key) or ""
     country["is_deleted"] = bool(country.get("is_deleted") or False)
     country["deleted_at"] = country.get("deleted_at") or None
     country["deleted_by"] = country.get("deleted_by") or ""
@@ -2838,22 +3065,23 @@ def _country_business_reference_counts(
     country_code: str,
     jurisdiction_id: str | None,
 ) -> list[dict[str, object]]:
-    excluded_tables = {"countries", "jurisdictions", "country_jurisdiction_map"}
     reference_counts: dict[str, int] = {}
-    cursor.execute(
-        """
-        SELECT DISTINCT TABLE_NAME AS table_name
-        FROM INFORMATION_SCHEMA.COLUMNS
-        WHERE TABLE_SCHEMA = DATABASE()
-          AND COLUMN_NAME IN ('country_code', 'jurisdiction_id')
-        """
-    )
-    table_names = [
-        str(row["table_name"])
-        for row in cursor.fetchall()
-        if str(row["table_name"]) not in excluded_tables
-    ]
-    for table_name in table_names:
+    business_tables = {
+        "fee_rules",
+        "country_path_rules",
+        "entity_type_rules",
+        "language_rules",
+        "fx_tax_rules",
+        "special_rules",
+        "quotation_draft_items",
+        "quotations",
+        "quotation_items",
+        "quotation_openings",
+        "jurisdiction_ip_system_relation",
+    }
+    for table_name in sorted(business_tables):
+        if not _table_exists(cursor, table_name):
+            continue
         where_parts: list[str] = []
         params: list[object] = []
         if _column_exists(cursor, table_name, "country_code"):
@@ -2864,7 +3092,9 @@ def _country_business_reference_counts(
             params.append(jurisdiction_id)
         if not where_parts:
             continue
-        where_sql = " OR ".join(where_parts)
+        where_sql = f"({' OR '.join(where_parts)})"
+        if table_name == "jurisdiction_ip_system_relation":
+            where_sql = f"{where_sql} AND publish_status = 'published'"
         cursor.execute(
             f"SELECT COUNT(*) AS count_value FROM `{table_name}` WHERE {where_sql}",
             tuple(params),
@@ -2878,10 +3108,23 @@ def _country_business_reference_counts(
 
 
 def _format_country_reference_block_message(references: list[dict[str, object]]) -> str:
-    summary = "，".join(f"{item['table']}:{item['count']}" for item in references[:8])
+    table_labels = {
+        "fee_rules": "价格规则",
+        "country_path_rules": "路径规则",
+        "entity_type_rules": "实体类型规则",
+        "language_rules": "语言/翻译规则",
+        "fx_tax_rules": "汇率/税率规则",
+        "special_rules": "特殊规则",
+        "quotation_draft_items": "报价草稿",
+        "quotations": "历史报价",
+        "quotation_items": "历史报价明细",
+        "quotation_openings": "开卷记录",
+        "jurisdiction_ip_system_relation": "条约/组织正式关系",
+    }
+    summary = "，".join(f"{table_labels.get(str(item['table']), '正式业务配置')}:{item['count']}" for item in references[:8])
     if len(references) > 8:
-        summary = f"{summary}，等 {len(references)} 个表"
-    return f"该对象已有业务数据引用，请改为停用。引用明细：{summary}"
+        summary = f"{summary}，等 {len(references)} 类引用"
+    return f"该对象已有正式业务数据引用，请改为停用。引用明细：{summary}"
 
 
 def _update_country_jurisdiction(
@@ -3001,6 +3244,7 @@ def _jurisdiction_updates_from_country_values(
         "source_verified": "source_verified",
         "source_verified_at": "source_verified_at",
         "source_verified_by": "source_verified_by",
+        "review_status": "review_status",
         "manual_override": "manual_override",
         "remarks": "remarks",
         "quote_selectable": "quote_selectable",
@@ -3008,6 +3252,12 @@ def _jurisdiction_updates_from_country_values(
         "quote_option_group": "quote_option_group",
         "quote_display_name": "quote_display_name",
         "not_selectable_reason": "not_selectable_reason",
+        "default_office_jurisdiction_id": "default_office_jurisdiction_id",
+        "default_office_code": "default_office_code",
+        "default_office_name_cn": "default_office_name_cn",
+        "default_office_name_en": "default_office_name_en",
+        "default_office_type": "default_office_type",
+        "default_office_source_note": "default_office_source_note",
     }
     updates = {
         target: _normalize_nullable_code_value(value)
@@ -3025,11 +3275,26 @@ def _jurisdiction_updates_from_country_values(
         updates["display_code"] = country_code
     if "internal_code" in updates and not updates["internal_code"]:
         updates["internal_code"] = country_code
+    for office_field in (
+        "default_office_code",
+        "default_office_name_cn",
+        "default_office_name_en",
+        "default_office_type",
+        "default_office_source_note",
+    ):
+        if office_field in updates and updates[office_field] is None:
+            updates[office_field] = ""
     return updates
 
 
 def _normalize_nullable_code_value(value: object) -> object:
     return None if value == "" else value
+
+
+def _restore_value(incoming: object, existing: object, overwrite: bool) -> object:
+    if overwrite or existing in (None, ""):
+        return incoming if incoming not in (None, "") else existing
+    return existing
 
 
 def _default_jurisdiction_type(country_code: str, country_type: object) -> str:

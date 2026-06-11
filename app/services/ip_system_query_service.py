@@ -208,7 +208,41 @@ REFERENCE_SEARCH_ALIASES = {
         "MACAU, CHINA",
     },
     "EU": {"EU", "欧盟", "歐盟", "欧洲联盟", "歐洲聯盟", "EUROPEAN UNION"},
+    "EP": {"EP", "EPO", "欧洲专利局", "歐洲專利局", "EUROPEAN PATENT OFFICE"},
+    "EM": {"EM", "EUIPO", "OHIM", "欧盟知识产权局", "歐盟知識產權局", "EUROPEAN UNION INTELLECTUAL PROPERTY OFFICE"},
+    "WO": {
+        "WO",
+        "WIPO",
+        "IB",
+        "International Bureau",
+        "International Bureau of WIPO",
+        "世界知识产权组织",
+        "世界知識產權組織",
+        "WIPO 国际局",
+        "WIPO 國際局",
+        "WORLD INTELLECTUAL PROPERTY ORGANIZATION",
+    },
+    "OA": {"OA", "OAPI", "非洲知识产权组织", "非洲知識產權組織", "AFRICAN INTELLECTUAL PROPERTY ORGANIZATION"},
+    "AP": {"AP", "ARIPO", "非洲地区知识产权组织", "非洲地區知識產權組織", "AFRICAN REGIONAL INTELLECTUAL PROPERTY ORGANIZATION"},
+    "EA": {"EA", "EAPO", "欧亚专利组织", "歐亞專利組織", "EURASIAN PATENT ORGANIZATION"},
 }
+
+REFERENCE_CANONICAL_ALIAS_GROUPS = {
+    canonical: aliases | {canonical}
+    for canonical, aliases in REFERENCE_SEARCH_ALIASES.items()
+}
+JURISDICTION_SEARCH_ALLOWED_TYPES = {
+    "single_country",
+    "country",
+    "region",
+    "special_region",
+    "regional_office",
+}
+JURISDICTION_SEARCH_ALLOWED_ORG_CODES = {"WO", "WIPO", "IB"}
+JURISDICTION_SEARCH_DISPLAY_CODES = {"WO": "WIPO"}
+JURISDICTION_SEARCH_ALIAS_ONLY_REFERENCE_CODES = {"IB"}
+JURISDICTION_SEARCH_BLOCKED_CODES = {"PCT", "HAGUE", "MADRID", "NICE", "EU"}
+JURISDICTION_SEARCH_BLOCKED_CANONICALS = {"EU"}
 
 
 @dataclass(frozen=True)
@@ -302,8 +336,9 @@ def search_jurisdictions(keyword: str) -> list[IpSystemJurisdictionOption]:
     value = keyword.strip()
     if not value:
         return []
-    official_options = _search_official_members(value)
-    seen_codes = {item.code.upper() for item in official_options}
+    options: list[IpSystemJurisdictionOption] = []
+    for option in _search_official_members(value):
+        _add_jurisdiction_search_option(options, option)
     like = f"%{value}%"
     code = value.upper()
     with mysql.connection_scope() as connection, connection.cursor() as cursor:
@@ -326,13 +361,11 @@ def search_jurisdictions(keyword: str) -> list[IpSystemJurisdictionOption]:
             (like, like, f"%{code}%", f"%{code}%", f"%{code}%"),
         )
         rows = cursor.fetchall()
-    options = list(official_options)
     for row in rows:
         option = _jurisdiction_option(row)
-        if option.code.upper() not in seen_codes:
-            options.append(option)
-            seen_codes.add(option.code.upper())
-    reference_options = _search_reference_objects(value)
+        if _is_allowed_jurisdiction_search_option(option):
+            _add_jurisdiction_search_option(options, option)
+    reference_options = _search_reference_objects(value, country_query_only=True)
     exact_reference_options = [
         option for option in reference_options if _is_exact_reference_query(value, option.code)
     ]
@@ -340,27 +373,147 @@ def search_jurisdictions(keyword: str) -> list[IpSystemJurisdictionOption]:
         option for option in reference_options if option.code not in {item.code for item in exact_reference_options}
     ]
     for option in reversed(exact_reference_options):
-        option_code = option.code.upper()
-        if option_code not in seen_codes:
-            options.insert(0, option)
-            seen_codes.add(option_code)
-        else:
-            options = [
-                _merge_reference_option(existing, option) if existing.code.upper() == option_code else existing
-                for existing in options
-            ]
-            options.sort(key=lambda item: 0 if item.code.upper() == option_code else 1)
+        _add_jurisdiction_search_option(options, option, prefer_front=True)
     for option in fuzzy_reference_options:
-        option_code = option.code.upper()
-        if option_code not in seen_codes:
-            options.append(option)
-            seen_codes.add(option_code)
-        else:
-            options = [
-                _merge_reference_option(existing, option) if existing.code.upper() == option_code else existing
-                for existing in options
-            ]
+        _add_jurisdiction_search_option(options, option)
     return options[:30]
+
+
+def _add_jurisdiction_search_option(
+    options: list[IpSystemJurisdictionOption],
+    option: IpSystemJurisdictionOption,
+    *,
+    prefer_front: bool = False,
+) -> None:
+    keys = _jurisdiction_option_dedupe_keys(option)
+    existing_index = next(
+        (
+            index
+            for index, existing in enumerate(options)
+            if keys & _jurisdiction_option_dedupe_keys(existing)
+        ),
+        None,
+    )
+    if existing_index is None:
+        if prefer_front:
+            options.insert(0, option)
+        else:
+            options.append(option)
+        return
+
+    merged = _merge_jurisdiction_search_option(options[existing_index], option)
+    del options[existing_index]
+    if prefer_front:
+        options.insert(0, merged)
+    else:
+        options.insert(existing_index, merged)
+
+
+def _jurisdiction_option_dedupe_keys(option: IpSystemJurisdictionOption) -> set[str]:
+    keys: set[str] = set()
+    if option.jurisdiction_id:
+        keys.add(f"id:{option.jurisdiction_id}")
+    normalized_code = _normalize_reference_search_text(option.code)
+    if normalized_code:
+        keys.add(f"code:{normalized_code}")
+    canonical = _canonical_reference_alias_key(
+        option.code,
+        option.name_zh,
+        option.name_en,
+    )
+    if canonical:
+        keys.add(f"canonical:{canonical}")
+    normalized_name_en = _normalize_reference_search_text(option.name_en)
+    normalized_type = _normalize_reference_search_text(option.object_type or option.member_type)
+    if normalized_name_en and normalized_type:
+        keys.add(f"name_type:{normalized_name_en}:{normalized_type}")
+    return keys
+
+
+def _canonical_reference_alias_key(*values: str) -> str:
+    normalized_values = {
+        _normalize_reference_search_text(value)
+        for value in values
+        if value
+    }
+    for canonical, aliases in REFERENCE_CANONICAL_ALIAS_GROUPS.items():
+        normalized_aliases = {
+            _normalize_reference_search_text(alias)
+            for alias in aliases
+            if alias
+        }
+        if normalized_values & normalized_aliases:
+            return canonical
+    return ""
+
+
+def _merge_jurisdiction_search_option(
+    existing: IpSystemJurisdictionOption,
+    incoming: IpSystemJurisdictionOption,
+) -> IpSystemJurisdictionOption:
+    primary = _preferred_jurisdiction_search_option(existing, incoming)
+    secondary = existing if primary is incoming else incoming
+    data = primary.model_dump()
+    for key in ("name_zh", "name_en", "member_type", "master_status", "master_status_label"):
+        if not data.get(key) and getattr(secondary, key):
+            data[key] = getattr(secondary, key)
+    data["matched_system_codes"] = list(dict.fromkeys([
+        *primary.matched_system_codes,
+        *secondary.matched_system_codes,
+    ]))
+    merged = IpSystemJurisdictionOption(**data)
+    if secondary.has_reference_object:
+        merged = _merge_reference_option(merged, secondary)
+    elif primary.has_reference_object:
+        merged = _merge_reference_option(merged, primary)
+    return merged
+
+
+def _preferred_jurisdiction_search_option(
+    existing: IpSystemJurisdictionOption,
+    incoming: IpSystemJurisdictionOption,
+) -> IpSystemJurisdictionOption:
+    if _jurisdiction_option_preference(incoming) > _jurisdiction_option_preference(existing):
+        return incoming
+    if incoming.jurisdiction_id and not existing.jurisdiction_id:
+        return incoming
+    return existing
+
+
+def _jurisdiction_option_preference(option: IpSystemJurisdictionOption) -> int:
+    canonical = _canonical_reference_alias_key(option.code, option.name_zh, option.name_en)
+    code = option.code.upper()
+    if canonical == "WO":
+        if code == "WIPO":
+            return 40
+        if code == "WO":
+            return 30
+        if code == "IB":
+            return 10
+    return 20
+
+
+def _is_allowed_jurisdiction_search_option(option: IpSystemJurisdictionOption) -> bool:
+    code = option.code.upper()
+    canonical = _canonical_reference_alias_key(option.code, option.name_zh, option.name_en)
+    if code in JURISDICTION_SEARCH_BLOCKED_CODES or canonical in JURISDICTION_SEARCH_BLOCKED_CANONICALS:
+        return False
+    object_type = option.object_type or option.member_type
+    if object_type in JURISDICTION_SEARCH_ALLOWED_TYPES:
+        return True
+    if object_type in {"international_organization", "intergovernmental_org", "organization"}:
+        return code in JURISDICTION_SEARCH_ALLOWED_ORG_CODES or canonical in JURISDICTION_SEARCH_ALLOWED_ORG_CODES
+    return False
+
+
+def _normalize_jurisdiction_search_display_option(option: IpSystemJurisdictionOption) -> IpSystemJurisdictionOption:
+    canonical = _canonical_reference_alias_key(option.code, option.name_zh, option.name_en)
+    display_code = JURISDICTION_SEARCH_DISPLAY_CODES.get(canonical)
+    if not display_code or option.code.upper() == display_code:
+        return option
+    data = option.model_dump()
+    data["code"] = display_code
+    return IpSystemJurisdictionOption(**data)
 
 
 def get_jurisdiction_memberships(jurisdiction_ids: list[str]) -> list[IpSystemJurisdictionMembershipGroup]:
@@ -1307,13 +1460,20 @@ def _reference_objects_by_code(codes: list[str] | None = None) -> dict[str, IpSy
     }
 
 
-def _search_reference_objects(keyword: str) -> list[IpSystemJurisdictionOption]:
+def _search_reference_objects(keyword: str, *, country_query_only: bool = False) -> list[IpSystemJurisdictionOption]:
     value = keyword.strip()
     if not value:
         return []
     normalized = _normalize_reference_search_text(value)
     matches: list[tuple[int, str, IpSystemJurisdictionOption]] = []
     for item in list_reference_objects().objects:
+        option = _reference_option(item)
+        if country_query_only and item.code.upper() in JURISDICTION_SEARCH_ALIAS_ONLY_REFERENCE_CODES:
+            continue
+        if country_query_only and not _is_allowed_jurisdiction_search_option(option):
+            continue
+        if country_query_only:
+            option = _normalize_jurisdiction_search_display_option(option)
         aliases = REFERENCE_SEARCH_ALIASES.get(item.code.upper(), set())
         normalized_aliases = {_normalize_reference_search_text(alias) for alias in aliases}
         normalized_code = _normalize_reference_search_text(item.code)
@@ -1334,7 +1494,7 @@ def _search_reference_objects(keyword: str) -> list[IpSystemJurisdictionOption]:
             score = 1
         else:
             score = 2
-        matches.append((score, item.code, _reference_option(item)))
+        matches.append((score, item.code, option))
     return [option for _, _, option in sorted(matches, key=lambda item: (item[0], item[1]))[:30]]
 
 

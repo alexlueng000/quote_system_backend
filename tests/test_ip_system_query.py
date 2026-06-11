@@ -179,6 +179,235 @@ def test_reference_object_search_aliases_find_hk_mo_and_eu(monkeypatch) -> None:
     assert eu_code_matches[0].code == "EU"
 
 
+def test_reference_object_search_aliases_find_regional_display_codes(monkeypatch) -> None:
+    monkeypatch.setattr(ip_system_query_service, "_master_status_by_codes", lambda codes: {})
+
+    expected = {
+        "EPO": "EP",
+        "EUIPO": "EM",
+        "WIPO": "WO",
+        "OAPI": "OA",
+        "ARIPO": "AP",
+        "EAPO": "EA",
+    }
+
+    for keyword, standard_code in expected.items():
+        matches = ip_system_query_service._search_reference_objects(keyword)  # noqa: SLF001
+        assert matches[0].code == standard_code
+        assert ip_system_query_service._is_exact_reference_query(keyword, standard_code)  # noqa: SLF001
+
+
+def test_jurisdiction_search_merges_ep_epo_reference_into_canonical_master(monkeypatch) -> None:
+    class FakeCursor:
+        def __enter__(self) -> "FakeCursor":
+            return self
+
+        def __exit__(self, *args, **kwargs) -> None:
+            return None
+
+        def execute(self, *args, **kwargs) -> None:
+            return None
+
+        def fetchall(self) -> list[dict[str, object]]:
+            return [
+                {
+                    "jurisdiction_id": "jur-EP",
+                    "display_code": "EPO",
+                    "internal_code": "EP",
+                    "name_cn": "欧洲专利局",
+                    "name_en": "European Patent Office",
+                    "jurisdiction_type": "regional_office",
+                }
+            ]
+
+    class FakeConnection:
+        def cursor(self) -> FakeCursor:
+            return FakeCursor()
+
+    class FakeConnectionScope:
+        def __enter__(self) -> FakeConnection:
+            return FakeConnection()
+
+        def __exit__(self, *args, **kwargs) -> None:
+            return None
+
+    monkeypatch.setattr(
+        ip_system_query_service,
+        "_search_official_members",
+        lambda keyword: [
+            ip_system_query_service.IpSystemJurisdictionOption(
+                code="EP",
+                name_zh="欧洲专利局",
+                name_en="European Patent Office",
+                member_type="regional_office",
+                master_status="missing",
+                master_status_label="未录入主档",
+                matched_system_codes=["EPC"],
+            )
+        ],
+    )
+    monkeypatch.setattr(ip_system_query_service, "_master_status_by_codes", lambda codes: {})
+    monkeypatch.setattr(ip_system_query_service, "_reference_baseline_by_code", lambda: {})
+    monkeypatch.setattr(ip_system_query_service.mysql, "connection_scope", lambda: FakeConnectionScope())
+
+    for keyword in ("欧洲", "EP", "EPO", "European Patent Office"):
+        matches = ip_system_query_service.search_jurisdictions(keyword)
+        epo_matches = [
+            item
+            for item in matches
+            if item.name_en == "European Patent Office" or item.code in {"EP", "EPO"}
+        ]
+        assert len(epo_matches) == 1
+        assert epo_matches[0].jurisdiction_id == "jur-EP"
+        assert epo_matches[0].code == "EPO"
+        assert epo_matches[0].has_reference_object
+        assert epo_matches[0].object_type_label == "区域局"
+
+
+def test_jurisdiction_search_filters_non_country_query_scope_objects(monkeypatch) -> None:
+    rows = [
+        {
+            "jurisdiction_id": "jur-EP",
+            "display_code": "EPO",
+            "internal_code": "EP",
+            "name_cn": "欧洲专利局",
+            "name_en": "European Patent Office",
+            "jurisdiction_type": "regional_office",
+        },
+        {
+            "jurisdiction_id": "jur-EM",
+            "display_code": "EUIPO",
+            "internal_code": "EM",
+            "name_cn": "欧盟知识产权局",
+            "name_en": "European Union Intellectual Property Office",
+            "jurisdiction_type": "regional_office",
+        },
+        {
+            "jurisdiction_id": "jur-WO",
+            "display_code": "WIPO",
+            "internal_code": "WO",
+            "name_cn": "世界知识产权组织",
+            "name_en": "World Intellectual Property Organization",
+            "jurisdiction_type": "international_organization",
+        },
+        {
+            "jurisdiction_id": "jur-IB",
+            "display_code": "IB",
+            "internal_code": "IB",
+            "name_cn": "WIPO 国际局",
+            "name_en": "International Bureau of WIPO",
+            "jurisdiction_type": "international_organization",
+        },
+        {
+            "jurisdiction_id": "jur-EU",
+            "display_code": "EU",
+            "internal_code": "EU",
+            "name_cn": "欧洲联盟",
+            "name_en": "European Union",
+            "jurisdiction_type": "international_organization",
+        },
+        {
+            "jurisdiction_id": "jur-PCT",
+            "display_code": "PCT",
+            "internal_code": "PCT",
+            "name_cn": "专利合作条约入口",
+            "name_en": "Patent Cooperation Treaty",
+            "jurisdiction_type": "treaty_entry",
+        },
+        {
+            "jurisdiction_id": "jur-HAGUE",
+            "display_code": "Hague",
+            "internal_code": "HAGUE",
+            "name_cn": "海牙体系",
+            "name_en": "Hague System",
+            "jurisdiction_type": "treaty_entry",
+        },
+        {
+            "jurisdiction_id": "jur-MADRID",
+            "display_code": "Madrid",
+            "internal_code": "MADRID",
+            "name_cn": "马德里体系",
+            "name_en": "Madrid System",
+            "jurisdiction_type": "treaty_entry",
+        },
+        {
+            "jurisdiction_id": "jur-NICE",
+            "display_code": "Nice",
+            "internal_code": "NICE",
+            "name_cn": "尼斯分类",
+            "name_en": "Nice Classification",
+            "jurisdiction_type": "treaty_entry",
+        },
+    ]
+
+    class FakeCursor:
+        keyword = ""
+
+        def __enter__(self) -> "FakeCursor":
+            return self
+
+        def __exit__(self, *args, **kwargs) -> None:
+            return None
+
+        def execute(self, query, params) -> None:
+            self.keyword = str(params[0]).strip("%").upper()
+
+        def fetchall(self) -> list[dict[str, object]]:
+            if not self.keyword:
+                return []
+            return [
+                row
+                for row in rows
+                if any(
+                    self.keyword in str(row.get(field) or "").upper()
+                    for field in ("display_code", "internal_code", "name_cn", "name_en")
+                )
+            ]
+
+    class FakeConnection:
+        def cursor(self) -> FakeCursor:
+            return FakeCursor()
+
+    class FakeConnectionScope:
+        def __enter__(self) -> FakeConnection:
+            return FakeConnection()
+
+        def __exit__(self, *args, **kwargs) -> None:
+            return None
+
+    monkeypatch.setattr(ip_system_query_service, "_search_official_members", lambda keyword: [])
+    monkeypatch.setattr(ip_system_query_service, "_master_status_by_codes", lambda codes: {})
+    monkeypatch.setattr(ip_system_query_service, "_reference_baseline_by_code", lambda: {})
+    monkeypatch.setattr(ip_system_query_service.mysql, "connection_scope", lambda: FakeConnectionScope())
+
+    europe_matches = ip_system_query_service.search_jurisdictions("欧洲")
+    assert {item.code for item in europe_matches} == {"EPO"}
+
+    broad_eu_matches = ip_system_query_service.search_jurisdictions("欧")
+    assert "EU" not in {item.code for item in broad_eu_matches}
+    assert {"EPO", "EUIPO", "EA"}.issubset({item.code for item in broad_eu_matches})
+
+    euipo_matches = ip_system_query_service.search_jurisdictions("EM")
+    assert [item.code for item in euipo_matches if item.name_zh == "欧盟知识产权局"] == ["EUIPO"]
+
+    for keyword in ("PCT", "Hague", "Madrid", "Nice"):
+        assert ip_system_query_service.search_jurisdictions(keyword) == []
+
+    wipo_matches = ip_system_query_service.search_jurisdictions("WO")
+    assert [item.code for item in wipo_matches if item.name_zh == "世界知识产权组织"] == ["WIPO"]
+
+    for keyword in ("wi", "WIPO", "IB", "International Bureau", "International Bureau of WIPO", "世界知识产权组织"):
+        matches = ip_system_query_service.search_jurisdictions(keyword)
+        wipo_related = [
+            item
+            for item in matches
+            if item.code in {"WIPO", "WO", "IB"} or "WIPO" in item.name_en or item.name_zh == "世界知识产权组织"
+        ]
+        assert len(wipo_related) == 1
+        assert wipo_related[0].code == "WIPO"
+        assert wipo_related[0].name_zh == "世界知识产权组织"
+
+
 def test_reference_only_membership_query_returns_display_group(monkeypatch) -> None:
     monkeypatch.setattr(ip_system_query_service, "_jurisdictions_by_ids", lambda ids: {})
     monkeypatch.setattr(ip_system_query_service, "_display_member_rows", lambda *args, **kwargs: [])

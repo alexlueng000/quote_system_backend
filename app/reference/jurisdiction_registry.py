@@ -3,6 +3,12 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from app.reference.ip_system_official_baseline import COUNTRY_NAMES
+from app.reference.jurisdiction_field_sources import (
+    BUSINESS_TAGS_BY_CODE,
+    OFFICE_ALIASES_BY_COUNTRY,
+    UN_M49_REGION_BY_CODE,
+    WIPO_LEX_CANDIDATE_SOURCE_NOTE,
+)
 from app.reference.jurisdictions import JURISDICTION_REFERENCES
 
 
@@ -179,13 +185,16 @@ def _from_static_reference(reference: object) -> JurisdictionReferenceRegistryIt
 
 
 def _country_candidate(code: str, name_cn: str, name_en: str) -> JurisdictionReferenceRegistryItem:
+    geo_region = UN_M49_REGION_BY_CODE.get(code, "Other")
+    business_tags = BUSINESS_TAGS_BY_CODE.get(code, ())
+    aliases = (code, name_cn, name_en, *OFFICE_ALIASES_BY_COUNTRY.get(code, ()))
     return JurisdictionReferenceRegistryItem(
         reference_id=f"ref-{code.lower()}",
         standard_code=code,
         display_code=DISPLAY_CODE_OVERRIDES.get(code, code),
         name_cn=name_cn,
         name_en=name_en,
-        aliases=(code, name_cn, name_en),
+        aliases=aliases,
         jurisdiction_type="special_region" if code in SPECIAL_REGION_CODES else "single_country",
         reference_category="region" if code in SPECIAL_REGION_CODES else "country",
         business_scope=("patent", "design"),
@@ -194,13 +203,13 @@ def _country_candidate(code: str, name_cn: str, name_en: str) -> JurisdictionRef
         quote_selectable_default=False,
         not_selectable_reason="未纳入当前报价范围",
         reserved_reason="",
-        geo_region="Other",
-        default_business_economic_regions=("OTHER",),
-        source_id="WIPO_LEX_REFERENCE",
-        source_name="WIPO Lex Members / treaty reference baseline",
-        source_url="https://www.wipo.int/wipolex/zh/members",
-        source_version="P0 WIPO Lex reference object baseline",
-        source_note="由条约/组织查询侧 WIPO Lex reference 对象池补入国家主档候选；不等于已启用报价国家。",
+        geo_region=geo_region,
+        default_business_economic_regions=business_tags,
+        source_id="WIPO_ST3",
+        source_name="WIPO ST.3 / UN M49 / BUSINESS_REGION_SOURCE field baseline",
+        source_url="https://www.wipo.int/standards/en/part_03_standards.html; https://unstats.un.org/unsd/methodology/m49/",
+        source_version="WIPO ST.3 current; UN M49 current",
+        source_note="普通国家/地区候选：standard_code/display_code=WIPO_ST3；international_region=UN_M49；business_region=BUSINESS_REGION_SOURCE。WIPO Lex 不作为国家主档字段来源。",
         source_verified=False,
         review_status="pending_review",
         is_active=True,
@@ -247,7 +256,7 @@ def _extra_candidate(code: str, name_cn: str, name_en: str, object_type: str) ->
         source_name="WIPO Lex Members / treaty reference baseline",
         source_url="https://www.wipo.int/wipolex/zh/members",
         source_version="P0 WIPO Lex reference object baseline",
-        source_note="由条约/组织查询侧 WIPO Lex reference 对象池补入国家主档候选；不等于已启用报价对象。",
+        source_note=f"由条约/组织查询侧 WIPO Lex reference 对象池补入候选；不等于已启用报价对象。{WIPO_LEX_CANDIDATE_SOURCE_NOTE}",
         source_verified=False,
         review_status="pending_review",
         is_active=True,
@@ -288,4 +297,4 @@ def _source_id_for_code(code: str) -> str:
         return "WIPO_TREATIES"
     if normalized in REGIONAL_OFFICE_CODES | INTERNATIONAL_ORG_CODES:
         return "WIPO_ST3"
-    return "WIPO_LEX_REFERENCE"
+    return "WIPO_ST3"
