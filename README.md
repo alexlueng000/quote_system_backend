@@ -14,7 +14,7 @@ uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
 先执行初始化脚本：
 
 ```bash
-mysql -u root -p < mysql_init.sql
+mysql -u root -p < migrations/mysql_init.sql
 ```
 
 后端通过环境变量读取连接信息：
